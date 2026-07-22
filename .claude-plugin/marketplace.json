@@ -1,0 +1,31 @@
+{
+  "name": "quetrex",
+  "owner": {
+    "name": "Glori Holdings"
+  },
+  "description": "The Quetrex agentic build system: a stack-agnostic pipeline engine plus per-language add-on packs. Every quality/security/process guarantee is enforced by a deterministic hook reading an on-disk artifact, never by agent prose. Private marketplace — github.com/Glori-Holdings/quetrex-plugins.",
+  "version": "1.0.0",
+  "plugins": [
+    {
+      "name": "quetrex-factory",
+      "source": "./plugins/quetrex-factory",
+      "version": "1.0.0",
+      "description": "Stack-agnostic engine: architect -> developer(s) -> QA -> reviewer -> security-reviewer -> git-workflow, with a right-size router, bounded self-heal loops, and hook-enforced merge gates. verify-gate blocks 'done' while typecheck/lint/build/tests are red; the security-reviewer OWASP checklist hard-blocks on any Critical.",
+      "author": {
+        "name": "Glori Holdings"
+      },
+      "homepage": "https://github.com/Glori-Holdings/quetrex-plugins",
+      "license": "UNLICENSED",
+      "keywords": [
+        "pipeline",
+        "agents",
+        "code-review",
+        "security-review",
+        "verification-gate",
+        "stack-agnostic"
+      ],
+      "strict": true,
+      "defaultEnabled": true
+    }
+  ]
+}

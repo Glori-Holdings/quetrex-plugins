@@ -1,0 +1,8 @@
+{
+  "name": "quetrex-rust",
+  "version": "0.1.0",
+  "description": "Rust pack: cargo fmt + clippy -D warnings + build + test verify chain, ownership/lifetime-aware architect guidance, and unsafe-block/panic security lenses.",
+  "author": {
+    "name": "Glori Holdings"
+  }
+}

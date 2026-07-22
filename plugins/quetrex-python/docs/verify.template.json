@@ -1,0 +1,20 @@
+{
+  "stack": "python",
+  "verify": [
+    "ruff check .",
+    "ruff format --check .",
+    "mypy .",
+    "pytest -q"
+  ],
+  "format": "ruff format",
+  "notes": [
+    "Ordered fail-fast chain, gated on REAL process exit codes only — never scraped stdout, no `|| true`. A non-zero on ANY step fails QA and blocks the finish (verify-gate on Stop/SubagentStop).",
+    "1. ruff check .: lint (pyflakes, pycodestyle, isort, pyupgrade, bugbear, and more via a single fast Rust engine). Broadest+cheapest, so it runs first.",
+    "2. ruff format --check .: formatter drift guard (Black-compatible). Catches files not saved through the format-on-save hook; never overlaps the linter.",
+    "3. mypy .: static type check across the whole package (src + tests + scripts). Swap to `pyright` if the project standardizes on it — keep exactly one type checker in the chain.",
+    "4. pytest -q: the authoritative behavior gate. Quiet reporter; add `--cov --cov-fail-under=<n>` if the project enforces coverage.",
+    "Order is load-bearing: fast static checks (lint → format → types) before the slow runtime gate (tests).",
+    "`.format` is invoked by the format-on-save hook with the changed file path appended as the final argument (ruff format <file>).",
+    "This chain is written by /quetrex-init into <repo>/.quetrex/verify.json; the ENGINE's verify-gate reads .verify[] verbatim and eval's each command string in the repo root. Run each command through the project's environment manager (e.g. `uv run <cmd>`, `poetry run <cmd>`, or an activated venv) so the right interpreter and deps resolve."
+  ]
+}

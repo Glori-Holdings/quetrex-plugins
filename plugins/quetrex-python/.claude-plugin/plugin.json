@@ -1,0 +1,8 @@
+{
+  "name": "quetrex-python",
+  "version": "0.1.0",
+  "description": "Python pack: ruff + mypy/pyright + pytest verify chain, packaging/venv-aware architect guidance, and injection/deserialization/secret security lenses.",
+  "author": {
+    "name": "Glori Holdings"
+  }
+}

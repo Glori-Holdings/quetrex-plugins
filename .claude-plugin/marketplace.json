@@ -11,19 +11,10 @@
       "source": "./plugins/quetrex-factory",
       "version": "1.0.0",
       "description": "Stack-agnostic engine: architect -> developer(s) -> QA -> reviewer -> security-reviewer -> git-workflow, with a right-size router, bounded self-heal loops, and hook-enforced merge gates. verify-gate blocks 'done' while typecheck/lint/build/tests are red; the security-reviewer OWASP checklist hard-blocks on any Critical.",
-      "author": {
-        "name": "Glori Holdings"
-      },
+      "author": { "name": "Glori Holdings" },
       "homepage": "https://github.com/Glori-Holdings/quetrex-plugins",
       "license": "UNLICENSED",
-      "keywords": [
-        "pipeline",
-        "agents",
-        "code-review",
-        "security-review",
-        "verification-gate",
-        "stack-agnostic"
-      ],
+      "keywords": ["pipeline", "agents", "code-review", "security-review", "verification-gate", "stack-agnostic"],
       "strict": true,
       "defaultEnabled": true
     },
@@ -31,20 +22,47 @@
       "name": "quetrex-nextjs",
       "source": "./plugins/quetrex-nextjs",
       "version": "0.1.0",
-      "description": "Next.js stack pack: App Router/RSC conventions (TypeScript strict, Tailwind/shadcn, TanStack Query + Zustand, Drizzle on Neon, Upstash Redis), the tsc -> eslint -> next build -> drizzle -> vitest -> playwright verify chain, Fly-primary ephemeral preview + E2E with mandatory teardown, and shadcn-add / drizzle-migrate skills. Layers on quetrex-factory; pin both in a Next.js repo.",
-      "author": {
-        "name": "Glori Holdings"
-      },
+      "description": "Next.js stack pack: App Router/RSC conventions (TypeScript strict, Tailwind/shadcn, TanStack Query + Zustand, Drizzle on Neon, Upstash Redis), the tsc -> eslint -> next build -> drizzle -> vitest -> playwright verify chain, Fly-primary ephemeral preview + E2E with mandatory teardown, and shadcn-add / drizzle-migrate skills. Layers on quetrex-factory.",
+      "author": { "name": "Glori Holdings" },
       "homepage": "https://github.com/Glori-Holdings/quetrex-plugins",
       "license": "UNLICENSED",
-      "keywords": [
-        "nextjs",
-        "typescript",
-        "react",
-        "drizzle",
-        "tailwind",
-        "stack-pack"
-      ],
+      "keywords": ["nextjs", "typescript", "react", "drizzle", "tailwind", "stack-pack"],
+      "strict": true,
+      "defaultEnabled": false
+    },
+    {
+      "name": "quetrex-python",
+      "source": "./plugins/quetrex-python",
+      "version": "0.1.0",
+      "description": "Python pack: ruff + mypy/pyright + pytest verify chain, packaging/venv-aware architect guidance, and injection/deserialization/secret security lenses. Layers on quetrex-factory.",
+      "author": { "name": "Glori Holdings" },
+      "homepage": "https://github.com/Glori-Holdings/quetrex-plugins",
+      "license": "UNLICENSED",
+      "keywords": ["python", "pytest", "ruff", "mypy", "stack-pack"],
+      "strict": true,
+      "defaultEnabled": false
+    },
+    {
+      "name": "quetrex-rust",
+      "source": "./plugins/quetrex-rust",
+      "version": "0.1.0",
+      "description": "Rust pack: cargo fmt + clippy -D warnings + build + test verify chain, ownership/lifetime-aware architect guidance, and unsafe-block/panic security lenses. Layers on quetrex-factory.",
+      "author": { "name": "Glori Holdings" },
+      "homepage": "https://github.com/Glori-Holdings/quetrex-plugins",
+      "license": "UNLICENSED",
+      "keywords": ["rust", "cargo", "clippy", "stack-pack"],
+      "strict": true,
+      "defaultEnabled": false
+    },
+    {
+      "name": "quetrex-swift",
+      "source": "./plugins/quetrex-swift",
+      "version": "0.1.0",
+      "description": "Swift pack: swiftlint + swift build + swift test verify chain, concurrency/actor-aware architect guidance, and Keychain/URLSession/ATS security lenses. Layers on quetrex-factory.",
+      "author": { "name": "Glori Holdings" },
+      "homepage": "https://github.com/Glori-Holdings/quetrex-plugins",
+      "license": "UNLICENSED",
+      "keywords": ["swift", "swiftpm", "swiftlint", "stack-pack"],
       "strict": true,
       "defaultEnabled": false
     }

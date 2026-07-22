@@ -1,0 +1,11 @@
+{
+  "name": "quetrex-nextjs",
+  "version": "0.1.0",
+  "description": "Next.js stack pack for the Quetrex factory: layers App Router + RSC conventions (TypeScript strict, Tailwind/shadcn, TanStack Query + Zustand, Drizzle on Neon, Upstash Redis) and the tsc -> eslint -> next build -> drizzle -> vitest -> playwright verify chain on top of the stack-agnostic quetrex-factory engine.",
+  "author": {
+    "name": "Glori Holdings"
+  },
+  "skills": [
+    "./skills/"
+  ]
+}

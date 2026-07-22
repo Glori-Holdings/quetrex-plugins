@@ -26,6 +26,27 @@
       ],
       "strict": true,
       "defaultEnabled": true
+    },
+    {
+      "name": "quetrex-nextjs",
+      "source": "./plugins/quetrex-nextjs",
+      "version": "0.1.0",
+      "description": "Next.js stack pack: App Router/RSC conventions (TypeScript strict, Tailwind/shadcn, TanStack Query + Zustand, Drizzle on Neon, Upstash Redis), the tsc -> eslint -> next build -> drizzle -> vitest -> playwright verify chain, Fly-primary ephemeral preview + E2E with mandatory teardown, and shadcn-add / drizzle-migrate skills. Layers on quetrex-factory; pin both in a Next.js repo.",
+      "author": {
+        "name": "Glori Holdings"
+      },
+      "homepage": "https://github.com/Glori-Holdings/quetrex-plugins",
+      "license": "UNLICENSED",
+      "keywords": [
+        "nextjs",
+        "typescript",
+        "react",
+        "drizzle",
+        "tailwind",
+        "stack-pack"
+      ],
+      "strict": true,
+      "defaultEnabled": false
     }
   ]
 }

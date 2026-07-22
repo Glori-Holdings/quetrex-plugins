@@ -1,0 +1,30 @@
+{
+  "stack": "nextjs",
+  "packageManager": "pnpm",
+  "verify": [
+    "pnpm exec tsc --noEmit",
+    "pnpm exec eslint .",
+    "pnpm exec prettier --check .",
+    "pnpm exec next build",
+    "pnpm exec drizzle-kit check",
+    "bash scripts/db-drift.sh",
+    "pnpm exec vitest run --reporter=dot",
+    "pnpm exec playwright test --reporter=line"
+  ],
+  "format": "pnpm exec prettier --write --ignore-unknown",
+  "coverageThreshold": 80,
+  "notes": [
+    "Ordered fail-fast chain, gated on REAL process exit codes only — never scraped stdout. A non-zero on ANY step fails QA and blocks the finish (verify-gate on Stop/SubagentStop).",
+    "1. tsc --noEmit: strict + noUncheckedIndexedAccess repo-wide (test files, scripts, config, dead code) — 10-50x faster than a build.",
+    "2. eslint .: ESLint 9 flat config (eslint-config-next core-web-vitals + typescript). Next 16 removed `next lint` and `next build` no longer lints, so ESLint is its own step.",
+    "3. prettier --check .: single formatter; catches files not saved through the format-on-save hook. Never overlaps ESLint.",
+    "4. next build: the ONLY step that catches server/client boundary + RSC serialization errors (server-only imported into a client tree, non-serializable props across `use client`). Never set typescript.ignoreBuildErrors. Build happens EXACTLY ONCE here — Playwright's webServer runs `pnpm start` against this artifact, it does not rebuild.",
+    "5. drizzle-kit check: validates migration history integrity.",
+    "6. scripts/db-drift.sh: READ-ONLY drift guard — generates into a throwaway temp copy of the migrations dir and never mutates the tracked tree. Fails if schema.ts changed without a committed migration (the most common Drizzle prod incident).",
+    "7. vitest run: unit + SYNC components only. ASYNC React Server Components are UNSUPPORTED in Vitest — they are E2E-ONLY, proven via Playwright in step 8. Always `vitest run` (never watch).",
+    "8. playwright test: E2E against the PRODUCTION build from step 4 (webServer: `pnpm start`, reuseExistingServer: !CI, trace: on-first-retry). The only place async RSC behavior, rate-limit/cache behavior, and full boundary rendering are actually verified.",
+    "Order is load-bearing: cheapest and broadest checks first (tsc), the slow authoritative gate (next build) once, then tests against that single artifact.",
+    "`.format` is invoked by the format-on-save hook with the changed file path appended as the final argument (prettier --write --ignore-unknown <file>).",
+    "This chain is written by /quetrex-init into <repo>/.quetrex/verify.json; the ENGINE's verify-gate reads .verify[] verbatim and eval's each command string in the repo root."
+  ]
+}

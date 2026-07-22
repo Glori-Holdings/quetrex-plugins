@@ -1,0 +1,19 @@
+{
+  "stack": "swift",
+  "verify": [
+    "swiftlint --strict",
+    "swift build",
+    "swift test"
+  ],
+  "format": "swiftformat",
+  "notes": [
+    "Ordered fail-fast chain, gated on REAL process exit codes only — never scraped stdout. A non-zero on ANY step fails QA and blocks the finish (verify-gate on Stop/SubagentStop).",
+    "1. swiftlint --strict: lint first — cheapest, broadest. --strict promotes every warning to an error so a style/convention violation returns a non-zero exit and blocks the finish. Runs before compilation.",
+    "2. swift build: the type + compile gate. The Swift compiler is the authority on types, availability, and — under Swift 6 / `-strict-concurrency=complete` — data-race safety across actor and Sendable boundaries. Never suppress with `// swiftlint:disable` in place of a real fix.",
+    "3. swift test: XCTest / Swift Testing suite run to completion. Exits non-zero on any failing test.",
+    "APP TARGETS (iOS/macOS UI, asset catalogs, Info.plist, entitlements): SwiftPM's `swift build`/`swift test` cannot build them. Replace steps 2-3 with a single `xcodebuild test -scheme <Scheme> -destination 'platform=iOS Simulator,name=iPhone 15'` (it both builds and tests). Keep `swiftlint --strict` as step 1. Pick ONE path per repo — a pure SwiftPM package uses swift build/test; anything with an .xcodeproj/.xcworkspace uses xcodebuild.",
+    "Order is load-bearing: lint (fast, broad) → build (authoritative type/concurrency gate) → test (behavior) against that compiled artifact.",
+    "`.format` is invoked by the format-on-save hook with the changed file path appended as the final argument (swiftformat <file>). SwiftFormat and SwiftLint are complementary: SwiftFormat rewrites layout, SwiftLint enforces rules; keep their configs non-overlapping.",
+    "This chain is written by /quetrex-init into <repo>/.quetrex/verify.json; the ENGINE's verify-gate reads .verify[] verbatim and eval's each command string in the repo root."
+  ]
+}

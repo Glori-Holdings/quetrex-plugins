@@ -1,0 +1,20 @@
+{
+  "stack": "rust",
+  "verify": [
+    "cargo fmt --all --check",
+    "cargo clippy --all-targets --all-features -- -D warnings",
+    "cargo build --all-targets",
+    "cargo test --all-targets"
+  ],
+  "format": "rustfmt --edition 2021",
+  "notes": [
+    "Ordered fail-fast chain, gated on REAL process exit codes only — never scraped stdout, no `|| true`. A non-zero on ANY step fails QA and blocks the finish (verify-gate on Stop/SubagentStop).",
+    "1. cargo fmt --all --check: rustfmt in check mode across every crate in the workspace; exits non-zero on any unformatted file without rewriting it. Cheapest, broadest gate — runs first.",
+    "2. cargo clippy --all-targets --all-features -- -D warnings: lint every target (lib, bins, tests, examples, benches) with all features on; `-D warnings` promotes ALL warnings (clippy + rustc) to hard errors so nothing merges dirty. Clippy also type-checks, so this doubles as the fast compile-error gate before the full build.",
+    "3. cargo build --all-targets: the authoritative compile of every target — proves the crate and its test/example/bench targets actually build, catching errors clippy's analysis-only pass can skip (link errors, build scripts, proc-macro expansion, cfg-gated code).",
+    "4. cargo test --all-targets: runs unit, integration, and doc-adjacent tests. `--all-targets` runs lib/bin/test/example targets; it does NOT run doctests — keep doctests green via a plain `cargo test` locally, but the gate standardizes on --all-targets for deterministic target selection.",
+    "Order is load-bearing: format and lint (cheap, broad) first, then the full build, then tests against that build.",
+    "`.format` is invoked by the format-on-save hook with the changed file path appended as the final argument (rustfmt --edition 2021 <file>); rustfmt formats the file in place.",
+    "This chain is written by /quetrex-init into <repo>/.quetrex/verify.json; the ENGINE's verify-gate reads .verify[] verbatim and eval's each command string in the repo root."
+  ]
+}

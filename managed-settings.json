@@ -1,0 +1,118 @@
+{
+  "_README": [
+    "quetrex-factory — MANAGED SETTINGS (the mandatory org floor).",
+    "",
+    "WHAT THIS IS: the highest-precedence Claude Code settings tier. Values here",
+    "CANNOT be overridden, weakened, or removed by any user ~/.claude/settings.json,",
+    "project .claude/settings.json, plugin settings, CLI flag, or environment. It is",
+    "the mechanical guarantee behind the four pillars — no teammate can silently",
+    "disable the verify-gate, the secret/destructive-command guards, or the merge gate,",
+    "not even under --dangerously-skip-permissions (a blocking PreToolUse hook and a",
+    "permission deny-LIST both precede permission-mode grants).",
+    "",
+    "HOW TO DEPLOY: this file is NOT read from the repo. An org admin installs it via",
+    "the Team/Enterprise managed-settings channel so it lands at the OS managed path",
+    "on every developer machine and every cloud session:",
+    "  macOS   : /Library/Application Support/ClaudeCode/managed-settings.json",
+    "  Linux   : /etc/claude-code/managed-settings.json",
+    "  Windows : C:\\ProgramData\\ClaudeCode\\managed-settings.json",
+    "Team/Enterprise admins push it from the admin console (or MDM); it is enforced",
+    "identically in local runs AND in cloud/remote sessions. This repo copy is the",
+    "source of truth the admin publishes — edits here take effect only after the admin",
+    "re-publishes. There is no per-project way to grant or bypass anything set below.",
+    "",
+    "AUTO MODE: the team runs permission-mode 'auto' (a blocking hook fires first, then",
+    "allow rules apply; prompts only for the residual). defaultMode:'auto' is HONORED",
+    "ONLY in the user settings tier and (as here) the managed tier — it is IGNORED in",
+    "project and plugin settings since v2.1.142. Because a project/plugin cannot grant",
+    "auto, the team default is set HERE (managed) so every developer and cloud session",
+    "gets auto without each person editing their own ~/.claude/settings.json. A user may",
+    "still choose a STRICTER mode locally; they can never drop below this floor.",
+    "",
+    "PLUGIN PIN: strictKnownMarketplaces + enabledPlugins force the single trusted",
+    "marketplace (github: Glori-Holdings/quetrex-plugins, private) and force-enable",
+    "quetrex-factory. No other marketplace can be added and the engine plugin cannot be",
+    "turned off. allowManagedHooksOnly:true means ONLY managed-tier and plugin-declared",
+    "hooks execute — ad-hoc hooks injected via user/project settings.json are ignored,",
+    "so a teammate cannot register a hook that shadows or neutralizes the floor.",
+    "",
+    "The ${CLAUDE_PLUGIN_ROOT} in the hook commands resolves to the installed",
+    "quetrex-factory plugin root (force-enabled above), so the floor hooks run the same",
+    "audited scripts the plugin ships — one source of truth, no divergent copies."
+  ],
+
+  "strictKnownMarketplaces": true,
+  "extraKnownMarketplaces": {
+    "quetrex": {
+      "source": {
+        "source": "github",
+        "repo": "Glori-Holdings/quetrex-plugins"
+      }
+    }
+  },
+  "enabledPlugins": {
+    "quetrex-factory@quetrex": true
+  },
+
+  "allowManagedHooksOnly": true,
+
+  "permissions": {
+    "defaultMode": "auto",
+    "deny": [
+      "Bash(git push --force:*)",
+      "Bash(git push -f:*)",
+      "Bash(git push --force-with-lease:*)",
+      "Bash(git reset --hard:*)",
+      "Bash(git clean -f:*)",
+      "Bash(git clean -d:*)",
+      "Bash(drizzle-kit push:*)",
+      "Bash(npx drizzle-kit push:*)",
+      "Bash(pnpm drizzle-kit push:*)",
+      "Bash(pnpm dlx drizzle-kit push:*)",
+      "Bash(yarn drizzle-kit push:*)",
+      "Bash(bunx drizzle-kit push:*)",
+      "Bash(rm -rf /:*)",
+      "Bash(rm -rf /)",
+      "Bash(rm -rf ~:*)",
+      "Bash(rm -rf ~)",
+      "Bash(rm -rf ~/:*)",
+      "Bash(rm -fr /:*)",
+      "Bash(rm -fr ~:*)",
+      "Bash(sudo rm -rf:*)",
+      "Bash(sudo rm -fr:*)"
+    ]
+  },
+
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          { "type": "command", "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/verify-gate.sh\"", "timeout": 600000 }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          { "type": "command", "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/verify-gate.sh\"", "timeout": 600000 }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          { "type": "command", "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/deny-guard.sh\"", "timeout": 5000 },
+          { "type": "command", "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/secret-scan.sh\"", "timeout": 5000 },
+          { "type": "command", "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/merge-gate.sh\"", "timeout": 15000 }
+        ]
+      },
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          { "type": "command", "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/secret-scan.sh\"", "timeout": 5000 }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,687 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Quetrex Onboarding Guide</title>
+<style>
+  :root {
+    --ink: #16181d;
+    --muted: #5b6270;
+    --faint: #8a91a0;
+    --line: #e2e5ea;
+    --accent: #2b5cff;
+    --accent-soft: #eef2ff;
+    --code-bg: #f6f7f9;
+    --code-ink: #1f2430;
+    --warn-bg: #fff7e8;
+    --warn-line: #f0c05a;
+    --good-bg: #eefaf1;
+    --good-line: #63c187;
+    --page-w: 210mm;
+  }
+
+  * { box-sizing: border-box; }
+
+  html { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+    color: var(--ink);
+    font-size: 10.5pt;
+    line-height: 1.55;
+    background: #f0f1f4;
+  }
+
+  .page {
+    background: #fff;
+    width: var(--page-w);
+    margin: 0 auto;
+    padding: 22mm 20mm;
+  }
+  .page + .page { margin-top: 8mm; }
+
+  h1, h2, h3, h4 { color: var(--ink); line-height: 1.2; font-weight: 700; }
+
+  h2 {
+    font-size: 17pt;
+    margin: 0 0 4px;
+    letter-spacing: -0.01em;
+  }
+  .sec-num {
+    display: inline-block;
+    font-size: 10pt;
+    font-weight: 700;
+    color: var(--accent);
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    margin-bottom: 6px;
+  }
+  .sec-head {
+    border-bottom: 2px solid var(--ink);
+    padding-bottom: 10px;
+    margin-bottom: 16px;
+  }
+  .sec-head p.lede {
+    margin: 6px 0 0;
+    color: var(--muted);
+    font-size: 10.5pt;
+  }
+
+  h3 {
+    font-size: 12pt;
+    margin: 20px 0 6px;
+  }
+  h4 {
+    font-size: 10.5pt;
+    margin: 14px 0 4px;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    font-size: 9pt;
+  }
+
+  p { margin: 0 0 9px; }
+
+  ul, ol { margin: 0 0 10px; padding-left: 20px; }
+  li { margin-bottom: 5px; }
+  li > ul, li > ol { margin-top: 5px; margin-bottom: 4px; }
+
+  strong { font-weight: 700; }
+  em { font-style: italic; color: var(--muted); }
+
+  code {
+    font-family: "SF Mono", "JetBrains Mono", "Fira Code", Menlo, Consolas, monospace;
+    font-size: 9pt;
+    background: var(--code-bg);
+    color: var(--code-ink);
+    padding: 1px 5px;
+    border-radius: 4px;
+    border: 1px solid var(--line);
+  }
+
+  pre {
+    font-family: "SF Mono", "JetBrains Mono", "Fira Code", Menlo, Consolas, monospace;
+    font-size: 8.6pt;
+    line-height: 1.5;
+    background: var(--code-bg);
+    color: var(--code-ink);
+    border: 1px solid var(--line);
+    border-left: 3px solid var(--accent);
+    border-radius: 6px;
+    padding: 11px 14px;
+    overflow-x: auto;
+    margin: 0 0 12px;
+    white-space: pre;
+  }
+  pre code { background: none; border: none; padding: 0; font-size: inherit; }
+  .cmt { color: var(--faint); }
+  .kw { color: var(--accent); font-weight: 600; }
+
+  .callout {
+    border-radius: 6px;
+    padding: 11px 14px;
+    margin: 0 0 12px;
+    font-size: 9.8pt;
+    border: 1px solid var(--line);
+    background: var(--accent-soft);
+    border-left: 3px solid var(--accent);
+  }
+  .callout .tag {
+    display: block;
+    font-weight: 700;
+    font-size: 8.5pt;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    margin-bottom: 3px;
+    color: var(--accent);
+  }
+  .callout.warn { background: var(--warn-bg); border-left-color: var(--warn-line); }
+  .callout.warn .tag { color: #b5810f; }
+  .callout.good { background: var(--good-bg); border-left-color: var(--good-line); }
+  .callout.good .tag { color: #248a52; }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 0 0 14px;
+    font-size: 9.6pt;
+  }
+  th, td {
+    text-align: left;
+    padding: 7px 10px;
+    border-bottom: 1px solid var(--line);
+    vertical-align: top;
+  }
+  th {
+    background: #f3f4f7;
+    font-size: 8.5pt;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--muted);
+    border-bottom: 1.5px solid var(--line);
+  }
+  td code { font-size: 8.4pt; white-space: nowrap; }
+
+  .pipeline {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: stretch;
+    gap: 6px;
+    margin: 6px 0 14px;
+  }
+  .pipeline .stage {
+    flex: 1 1 auto;
+    background: var(--accent-soft);
+    border: 1px solid #cdd8ff;
+    border-radius: 5px;
+    padding: 8px 6px;
+    text-align: center;
+    font-size: 8.6pt;
+    font-weight: 600;
+    color: #1e3fb0;
+    min-width: 74px;
+  }
+  .pipeline .stage .arrow { color: var(--faint); }
+  .pipeline .arrow-sep {
+    align-self: center;
+    color: var(--faint);
+    font-weight: 700;
+    font-size: 11pt;
+  }
+
+  /* Title page */
+  .cover {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    min-height: 244mm;
+    padding: 22mm 20mm;
+  }
+  .cover .brand {
+    font-size: 11pt;
+    letter-spacing: 0.32em;
+    text-transform: uppercase;
+    color: var(--accent);
+    font-weight: 700;
+    margin-bottom: 24px;
+  }
+  .cover h1 {
+    font-size: 40pt;
+    line-height: 1.02;
+    letter-spacing: -0.02em;
+    margin: 0 0 14px;
+  }
+  .cover .sub {
+    font-size: 14pt;
+    color: var(--muted);
+    max-width: 135mm;
+    line-height: 1.45;
+    margin-bottom: 40px;
+  }
+  .cover .rule {
+    height: 3px;
+    width: 64px;
+    background: var(--accent);
+    margin-bottom: 28px;
+  }
+  .cover .meta {
+    border-top: 1px solid var(--line);
+    padding-top: 16px;
+    display: flex;
+    gap: 40px;
+    font-size: 9.5pt;
+    color: var(--muted);
+  }
+  .cover .meta b { display: block; color: var(--ink); font-size: 10pt; margin-bottom: 2px; }
+  .cover .foot {
+    margin-top: auto;
+    padding-top: 30px;
+    font-size: 8.5pt;
+    color: var(--faint);
+  }
+
+  .toc { margin-top: 8px; }
+  .toc li { margin-bottom: 7px; font-size: 10.5pt; }
+  .toc .n { color: var(--accent); font-weight: 700; display: inline-block; width: 24px; }
+
+  .keyval { display: grid; grid-template-columns: 150px 1fr; gap: 4px 14px; margin: 0 0 12px; font-size: 9.8pt; }
+  .keyval dt { font-weight: 700; }
+  .keyval dd { margin: 0; color: var(--muted); }
+
+  .cols2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+
+  .qref-card {
+    border: 1px solid var(--line);
+    border-radius: 7px;
+    padding: 12px 14px;
+    background: #fbfbfc;
+  }
+  .qref-card h4 { margin-top: 0; }
+
+  @page {
+    size: A4;
+    margin: 14mm;
+  }
+
+  @media print {
+    body { background: #fff; font-size: 10pt; }
+    .page {
+      width: auto;
+      margin: 0;
+      padding: 0;
+    }
+    .page + .page { margin-top: 0; }
+    .section { page-break-before: always; }
+    .cover { min-height: auto; page-break-after: always; }
+    pre, table, .callout, .pipeline { page-break-inside: avoid; }
+    h2, h3 { page-break-after: avoid; }
+  }
+</style>
+</head>
+<body>
+
+<!-- ============ TITLE PAGE ============ -->
+<section class="page cover">
+  <div class="brand">Quetrex</div>
+  <div class="rule"></div>
+  <h1>Onboarding&nbsp;Guide</h1>
+  <div class="sub">Set up your machine, load the plugins, and ship work through the agent pipeline — from your desk or from anywhere.</div>
+  <div class="meta">
+    <div><b>Audience</b>Senior engineers</div>
+    <div><b>Scope</b>Setup · Plugins · Permissions · Daily workflow</div>
+    <div><b>Read time</b>~15 minutes</div>
+  </div>
+  <div class="foot">Internal engineering document. Quetrex is a framework layered on Claude Code — compute is bring-your-own.</div>
+</section>
+
+<!-- ============ CONTENTS ============ -->
+<section class="page section">
+  <div class="sec-head">
+    <span class="sec-num">Contents</span>
+    <h2>What's in this guide</h2>
+    <p class="lede">Read §1 for the mental model, then work top-to-bottom. §7 is a one-page reference to keep open.</p>
+  </div>
+  <ol class="toc" style="list-style:none;padding-left:0;">
+    <li><span class="n">1</span> What Quetrex is — the mental model</li>
+    <li><span class="n">2</span> One-time machine setup — Tailscale, SSH, Claude Code auth</li>
+    <li><span class="n">3</span> Load &amp; use the plugins — marketplace, pinning, cloud parity</li>
+    <li><span class="n">4</span> Permissions — run AUTO mode, not skip-permissions</li>
+    <li><span class="n">5</span> The daily workflow — the lean command set</li>
+    <li><span class="n">6</span> Work from anywhere — SSH or claude.ai/code</li>
+    <li><span class="n">7</span> Quick reference — commands, plugins, gotchas</li>
+  </ol>
+
+  <div class="callout">
+    <span class="tag">The one-sentence version</span>
+    Quetrex is a private plugin family that turns Claude Code into a pipeline of specialist agents whose guarantees are enforced by on-disk hooks — and you run it under <em>your own</em> Claude subscription.
+  </div>
+</section>
+
+<!-- ============ 1 · WHAT QUETREX IS ============ -->
+<section class="page section">
+  <div class="sec-head">
+    <span class="sec-num">Section 1</span>
+    <h2>What Quetrex is</h2>
+    <p class="lede">The mental model. Get this and everything else is mechanics.</p>
+  </div>
+
+  <p>Quetrex is a <strong>private plugin family for Claude Code</strong>. It doesn't replace Claude and it doesn't host any AI — it's the framework that makes a fleet of agents produce reviewable, mergeable work instead of a wall of confident prose.</p>
+
+  <h3>The engine + per-stack packs</h3>
+  <p>There is one stack-agnostic engine and a set of thin, stack-specific packs on top of it:</p>
+  <ul>
+    <li><strong>quetrex-factory</strong> — the ENGINE. Stack-agnostic. Defines the agents, the pipeline, and the hooks. Goes on <em>every</em> repo.</li>
+    <li><strong>Per-stack packs</strong> — <code>quetrex-nextjs</code>, <code>quetrex-python</code>, <code>quetrex-rust</code>, <code>quetrex-swift</code>. These add the build/lint/test/verify specifics for one stack. You enable <em>only</em> the pack that matches the repo.</li>
+  </ul>
+
+  <h3>The pipeline it enforces</h3>
+  <p>Every task runs through a fixed sequence of specialist agents. Each stage has one job and hands off to the next:</p>
+  <div class="pipeline">
+    <div class="stage">architect</div>
+    <div class="arrow-sep">→</div>
+    <div class="stage">developer(s)</div>
+    <div class="arrow-sep">→</div>
+    <div class="stage">QA</div>
+    <div class="arrow-sep">→</div>
+    <div class="stage">reviewer</div>
+    <div class="arrow-sep">→</div>
+    <div class="stage">security-reviewer</div>
+    <div class="arrow-sep">→</div>
+    <div class="stage">git-workflow</div>
+  </div>
+  <p>The architect plans and assigns strict file ownership; developers work in parallel worktrees on separate sub-branches; QA proves green with real exit codes; the reviewer reads the full diff for logic and architecture; the security-reviewer scans for vulnerabilities; git-workflow opens the squash PR.</p>
+
+  <h3>The load-bearing idea: guarantees are hooks, not prose</h3>
+  <p>This is what makes Quetrex trustworthy. <strong>Every guarantee is a HOOK that reads an on-disk artifact — never an agent's word for it.</strong> An agent claiming "tests pass" means nothing; a hook reading the actual exit code and the actual test output on disk is the gate. You cannot talk your way past a hook.</p>
+  <div class="callout good">
+    <span class="tag">Why this matters</span>
+    The pipeline's promises (green build, no secrets committed, branch discipline, no force-push) survive even when an agent is wrong or over-eager, because they're mechanically checked against files — not asserted in chat.
+  </div>
+
+  <h3>The kanban</h3>
+  <p>Coordination — tasks, status columns, escalations — lives on a shared <strong>kanban</strong>. It's your window into every task across every machine. You watch the board; the pipeline does the work.</p>
+
+  <h3>Compute is bring-your-own</h3>
+  <p>Quetrex is the framework, <em>not</em> the AI. Each engineer runs Claude Code under <strong>their own Claude subscription</strong> (Max or Pro). There is no shared inference bill and no central runner burning tokens on your behalf — your machine (or your cloud session) runs the agents on your plan.</p>
+
+  <dl class="keyval">
+    <dt>Quetrex provides</dt><dd>Plugins, agents, hooks, the kanban, the command set.</dd>
+    <dt>You provide</dt><dd>Your Claude Code subscription and the machine (or cloud session) it runs on.</dd>
+  </dl>
+</section>
+
+<!-- ============ 2 · MACHINE SETUP ============ -->
+<section class="page section">
+  <div class="sec-head">
+    <span class="sec-num">Section 2</span>
+    <h2>One-time machine setup</h2>
+    <p class="lede">Do this once per machine. It makes your always-on box reachable from anywhere and gets Claude Code authenticated.</p>
+  </div>
+
+  <h3>2.1 &nbsp;Tailscale — a stable name for every machine</h3>
+  <p>Tailscale puts all your machines on one private mesh network (a <em>tailnet</em>). Every machine gets a stable name reachable from anywhere — no port-forwarding, no VPN concentrator, no firewall spelunking.</p>
+  <ol>
+    <li>Install Tailscale from <code>tailscale.com/download</code>.</li>
+    <li>Sign in with the <strong>company account</strong> so you join the shared tailnet.</li>
+    <li>Bring the machine up:</li>
+  </ol>
+<pre><code><span class="cmt"># connect this machine to the tailnet</span>
+tailscale up
+
+<span class="cmt"># find machine names / IPs on your tailnet</span>
+tailscale status</code></pre>
+  <p><code>tailscale status</code> lists each machine's tailnet name (e.g. <code>studio</code>) and its <code>100.x.y.z</code> address. That name is stable — note it for the next step.</p>
+
+  <h3>2.2 &nbsp;SSH config — <code>ssh studio</code> from anywhere</h3>
+  <p>Add a <code>Host</code> block to <code>~/.ssh/config</code> so a short alias connects to your always-on machine over the tailnet. This is how you drive terminal sessions from a laptop, a café, or a phone.</p>
+<pre><code><span class="cmt"># ~/.ssh/config</span>
+Host studio
+    HostName studio            <span class="cmt"># tailscale name (or 100.x.y.z)</span>
+    User    you                <span class="cmt"># your username on that box</span></code></pre>
+  <p>Now <code>ssh studio</code> lands you on your always-on machine. On flaky networks (mobile, hotel wifi) use <strong><code>mosh</code></strong> instead — it survives roaming and dropped links and keeps your session alive:</p>
+<pre><code>mosh studio</code></pre>
+
+  <h3>2.3 &nbsp;Claude Code auth</h3>
+  <p>Log in once with your Max (or Pro) subscription. This binds Claude Code on this machine to <em>your</em> plan — the compute you'll run the pipeline on.</p>
+<pre><code>claude          <span class="cmt"># launch Claude Code</span>
+/login          <span class="cmt"># authenticate with your Claude subscription</span></code></pre>
+
+  <h3>2.4 &nbsp;AUTO permission mode</h3>
+  <p>The last piece of machine setup is enabling AUTO permission mode so the pipeline runs without babysitting — and doing it correctly. It's important enough to have its own section: <strong>see §4</strong> before you flip it on.</p>
+
+  <div class="callout">
+    <span class="tag">Setup checklist</span>
+    Tailscale up &amp; joined the company tailnet · <code>~/.ssh/config</code> Host block added · <code>claude /login</code> done under your subscription · AUTO mode configured (§4).
+  </div>
+</section>
+
+<!-- ============ 3 · PLUGINS ============ -->
+<section class="page section">
+  <div class="sec-head">
+    <span class="sec-num">Section 3</span>
+    <h2>Load &amp; use the plugins</h2>
+    <p class="lede">Add the private marketplace once; each repo pins what it needs. Identical locally and in the cloud.</p>
+  </div>
+
+  <h3>3.1 &nbsp;Add the private marketplace (once)</h3>
+  <p>Register the Quetrex plugin marketplace on your machine a single time:</p>
+<pre><code>/plugin marketplace add Glori-Holdings/quetrex-plugins</code></pre>
+  <p>The marketplace is <strong>private</strong>. It's reached through your own GitHub access combined with the cloud GitHub proxy — so if you can read the org on GitHub, the marketplace resolves. No separate credentials to manage.</p>
+
+  <h3>3.2 &nbsp;A project pins what it needs</h3>
+  <p>You don't manually enable plugins per repo from memory. Each project <strong>pins</strong> its plugins via a checked-in <code>.claude/settings.json</code>. Clone the repo, and the right plugins are already declared:</p>
+<pre><code><span class="cmt">// .claude/settings.json  (checked into the repo)</span>
+{
+  <span class="kw">"extraKnownMarketplaces"</span>: {
+    <span class="kw">"quetrex"</span>: {
+      <span class="kw">"source"</span>: {
+        <span class="kw">"source"</span>: <span class="kw">"github"</span>,
+        <span class="kw">"repo"</span>: <span class="kw">"Glori-Holdings/quetrex-plugins"</span>
+      }
+    }
+  },
+  <span class="kw">"enabledPlugins"</span>: {
+    <span class="kw">"quetrex-factory@quetrex"</span>: true,
+    <span class="kw">"quetrex-nextjs@quetrex"</span>: true
+  }
+}</code></pre>
+  <div class="callout">
+    <span class="tag">The rule</span>
+    The <strong>engine (<code>quetrex-factory</code>) goes on every repo</strong>. The <strong>stack pack goes only on repos of that stack</strong> — a Next.js repo enables <code>quetrex-nextjs</code>, a Rust repo enables <code>quetrex-rust</code>, and never both.
+  </div>
+
+  <h3>3.3 &nbsp;Local and cloud are identical</h3>
+  <p>This whole mechanism works the same way whether you run Claude Code on your own machine or in <strong>claude.ai/code</strong> (the cloud sandbox). In the cloud, the session:</p>
+  <ol>
+    <li>clones the repo,</li>
+    <li>installs the pinned plugins from the private marketplace, and</li>
+    <li>runs the hooks in the sandbox — exactly as they'd run locally.</li>
+  </ol>
+  <p>So <strong>"work from anywhere" = open claude.ai/code</strong>. There is no self-hosted runner to stand up or maintain; the cloud session runs under your own subscription with the same guarantees.</p>
+
+  <h3>3.4 &nbsp;Updating plugins</h3>
+  <p>Keep plugins current with the native command — nothing Quetrex-specific:</p>
+<pre><code>/plugin update</code></pre>
+  <div class="callout warn">
+    <span class="tag">Don't</span>
+    There is no <code>/quetrex-update</code>. Use the native <code>/plugin update</code> to pull new plugin versions.
+  </div>
+</section>
+
+<!-- ============ 4 · PERMISSIONS ============ -->
+<section class="page section">
+  <div class="sec-head">
+    <span class="sec-num">Section 4</span>
+    <h2>Permissions — get this right</h2>
+    <p class="lede">Run AUTO mode. Do not reach for <code>--dangerously-skip-permissions</code>. The difference is the whole safety story.</p>
+  </div>
+
+  <h3>4.1 &nbsp;AUTO mode vs. skip-permissions</h3>
+  <table>
+    <thead>
+      <tr><th style="width:30%">&nbsp;</th><th>AUTO mode &nbsp;(use this)</th><th><code>--dangerously-skip-permissions</code></th></tr>
+    </thead>
+    <tbody>
+      <tr><td><strong>Approval prompts</strong></td><td>None — full autonomy, no constant clicking</td><td>None</td></tr>
+      <tr><td><strong>Destructive-action guard</strong></td><td>A documented classifier blocks destructive actions</td><td>Nothing blocks anything</td></tr>
+      <tr><td><strong>Guard hooks</strong></td><td>Still fire (deny-guard, secret-scan, etc.)</td><td>Bypassed intent — for throwaway envs only</td></tr>
+      <tr><td><strong>When to use</strong></td><td>Your daily driver</td><td>Throwaway VMs only</td></tr>
+    </tbody>
+  </table>
+  <p>AUTO mode gives you the autonomy you want (no prompt-fatigue) <em>and</em> keeps the safety net: a documented classifier refuses destructive operations, and the guard hooks continue to run. <code>--dangerously-skip-permissions</code> is documented for disposable VMs only — do not use it for real work.</p>
+
+  <h3>4.2 &nbsp;Enable AUTO mode</h3>
+  <p>Set the default mode in <strong>your own</strong> <code>~/.claude/settings.json</code>:</p>
+<pre><code><span class="cmt">// ~/.claude/settings.json  (YOUR user settings)</span>
+{
+  <span class="kw">"permissions"</span>: {
+    <span class="kw">"defaultMode"</span>: <span class="kw">"auto"</span>
+  }
+}</code></pre>
+  <div class="callout warn">
+    <span class="tag">Why it must be user settings</span>
+    <code>auto</code> is honored <strong>only in USER settings or managed settings</strong> — a project cannot grant itself auto mode. This is deliberate: a repo you clone can't silently escalate its own autonomy.
+  </div>
+  <p>With that set, plain <code>claude</code> starts in auto mode. To switch modes mid-session, <strong>Shift+Tab cycles</strong> through the permission modes — look for the <code>auto mode on</code> indicator to confirm you're in it.</p>
+
+  <h3>4.3 &nbsp;Whitelisting trusted infra</h3>
+  <p>The classifier is conservative and will sometimes block routine operations against infrastructure it doesn't recognize. Add trusted hosts/targets to <code>autoMode.environment</code> so routine ops flow without tripping the guard:</p>
+<pre><code>{
+  <span class="kw">"permissions"</span>: { <span class="kw">"defaultMode"</span>: <span class="kw">"auto"</span> },
+  <span class="kw">"autoMode"</span>: {
+    <span class="kw">"environment"</span>: [ <span class="cmt">/* trusted infra the classifier should allow */</span> ]
+  }
+}</code></pre>
+
+  <h3>4.4 &nbsp;The guardrails you can't ship past</h3>
+  <p>These are HOOKS. They fire in auto mode regardless of what any agent decides, because they read on-disk state — not agent claims:</p>
+  <table>
+    <thead><tr><th>Hook</th><th>Guarantees</th></tr></thead>
+    <tbody>
+      <tr><td><code>deny-guard</code></td><td>Blocks destructive / disallowed operations.</td></tr>
+      <tr><td><code>secret-scan</code></td><td>Stops secrets from being committed.</td></tr>
+      <tr><td><code>enforce-branch</code></td><td>Keeps work off <code>main</code> — feature branches only.</td></tr>
+      <tr><td><code>verify-gate</code></td><td>Requires a real green build/test result before a PR is considered.</td></tr>
+      <tr><td><code>merge-gate</code></td><td>Prevents force-pushing / merging past review.</td></tr>
+    </tbody>
+  </table>
+  <div class="callout good">
+    <span class="tag">Bottom line</span>
+    In AUTO mode you get hands-off autonomy, but you <strong>can't ship broken code or force-push past the gates</strong> — the hooks won't let you.
+  </div>
+</section>
+
+<!-- ============ 5 · DAILY WORKFLOW ============ -->
+<section class="page section">
+  <div class="sec-head">
+    <span class="sec-num">Section 5</span>
+    <h2>The daily workflow</h2>
+    <p class="lede">A lean command set. Set up once, then it's new → refine → build, and you observe the board.</p>
+  </div>
+
+  <h3>5.1 &nbsp;Setup commands</h3>
+  <dl class="keyval">
+    <dt><code>/quetrex-setup</code></dt><dd>Once per machine. GitHub auth, git identity, API keys.</dd>
+    <dt><code>/quetrex-init</code></dt><dd>Once per repo. Auto-detects the GitHub remote and links the kanban project.</dd>
+  </dl>
+
+  <h3>5.2 &nbsp;The per-task loop</h3>
+  <table>
+    <thead><tr><th style="width:34%">Command</th><th>What it does</th></tr></thead>
+    <tbody>
+      <tr><td><code>/quetrex-task-new</code></td><td>Create a task on the kanban.</td></tr>
+      <tr><td><code>/quetrex-task-refine</code></td><td>Sharpen the task into a buildable spec, grounded in the repo. <strong>The highest-leverage step</strong> — a sharp spec is the difference between a clean build and rework.</td></tr>
+      <tr><td><code>/quetrex-task-build</code></td><td>Run the full pipeline (architect → … → git-workflow).</td></tr>
+      <tr><td><code>/quetrex-task-rework</code></td><td>For stuck or failed tasks: agree a fix plan and re-queue through the pipeline.</td></tr>
+    </tbody>
+  </table>
+  <div class="callout">
+    <span class="tag">Spend your attention here</span>
+    <code>/quetrex-task-refine</code> is where a human adds the most value. Under-specified tasks are the top cause of rework — invest in the spec, then let the pipeline run.
+  </div>
+
+  <h3>5.3 &nbsp;Merge is automatic</h3>
+  <p>You do <strong>not</strong> merge routine tasks by hand. After the pipeline's review:</p>
+  <ul>
+    <li><strong>Clean review → auto-merges.</strong> No action from you.</li>
+    <li><strong>Issues found → rework.</strong> The task loops back automatically.</li>
+    <li><strong>Risky → escalates to a human.</strong> You merge it on GitHub after a look.</li>
+  </ul>
+  <div class="callout warn">
+    <span class="tag">Don't</span>
+    There is no <code>/quetrex-task-merge</code> for routine work — merge is automatic. You only touch a merge when review escalates it to you.
+  </div>
+
+  <h3>5.4 &nbsp;Deploy &amp; complete</h3>
+  <p>Only <strong>production deploy is manual</strong> — the one deliberate human gate at the end:</p>
+  <dl class="keyval">
+    <dt><code>/quetrex-deploy</code></dt><dd>Deploy to production. Manual, on purpose.</dd>
+    <dt><code>/quetrex-task-complete</code></dt><dd>Mark a deployed task complete.</dd>
+  </dl>
+
+  <h3>5.5 &nbsp;Observe, don't babysit</h3>
+  <p>Watch the <strong>kanban</strong>, not your terminals. Your job is to act at gates — review escalations and production deploys — and to respond when a task raises a <code>needs_clarity</code> escalation asking a question only you can answer. Everything between those points runs itself.</p>
+</section>
+
+<!-- ============ 6 · WORK FROM ANYWHERE ============ -->
+<section class="page section">
+  <div class="sec-head">
+    <span class="sec-num">Section 6</span>
+    <h2>Work from anywhere</h2>
+    <p class="lede">Two paths to the same pipeline. The board is your window from any device.</p>
+  </div>
+
+  <div class="cols2">
+    <div class="qref-card">
+      <h4>Path A — SSH to your always-on machine</h4>
+      <p>Your desktop/studio box stays on and runs the agents under your subscription. Reach it over the tailnet from any device:</p>
+<pre><code>ssh studio          <span class="cmt"># or:</span>
+mosh studio         <span class="cmt"># flaky networks</span></code></pre>
+      <p>Tailscale gives it a stable name; <code>~/.ssh/config</code> gives you the short alias (§2). Your laptop is just a terminal — the compute lives on the always-on box.</p>
+    </div>
+    <div class="qref-card">
+      <h4>Path B — claude.ai/code (cloud)</h4>
+      <p>No always-on machine needed. Open <strong>claude.ai/code</strong>; the cloud session clones the repo, installs the pinned plugin from the private marketplace, and runs the hooks in the sandbox — under <em>your</em> subscription.</p>
+      <p>Same plugins, same gates, same guarantees as local. Nothing to self-host.</p>
+    </div>
+  </div>
+
+  <div class="callout good">
+    <span class="tag">Your window into everything</span>
+    Whichever path you take, the <strong>kanban board</strong> shows every task's status across every machine and cloud session, from your phone or a browser tab. You steer from the board and act only at the gates.
+  </div>
+
+  <p>Because compute is bring-your-own and the plugin loads identically in both places, there's no difference in output between working at your desk, over SSH from a hotel, or from a cloud session on a borrowed laptop.</p>
+</section>
+
+<!-- ============ 7 · QUICK REFERENCE ============ -->
+<section class="page section">
+  <div class="sec-head">
+    <span class="sec-num">Section 7</span>
+    <h2>Quick reference</h2>
+    <p class="lede">Keep this page open. The commands, the plugins, and the traps.</p>
+  </div>
+
+  <div class="cols2">
+    <div>
+      <h4>The command set</h4>
+      <table>
+        <tbody>
+          <tr><td><code>/quetrex-setup</code></td><td>Once / machine</td></tr>
+          <tr><td><code>/quetrex-init</code></td><td>Once / repo</td></tr>
+          <tr><td><code>/quetrex-task-new</code></td><td>Create task</td></tr>
+          <tr><td><code>/quetrex-task-refine</code></td><td>Sharpen spec ★</td></tr>
+          <tr><td><code>/quetrex-task-build</code></td><td>Run pipeline</td></tr>
+          <tr><td><code>/quetrex-task-rework</code></td><td>Fix + re-queue</td></tr>
+          <tr><td><code>/quetrex-deploy</code></td><td>Prod deploy (manual)</td></tr>
+          <tr><td><code>/quetrex-task-complete</code></td><td>Mark done</td></tr>
+        </tbody>
+      </table>
+      <p style="font-size:8.6pt;color:var(--muted);margin-top:-4px;">★ highest-leverage step. Native <code>/plugin update</code> updates plugins.</p>
+    </div>
+    <div>
+      <h4>The plugins</h4>
+      <table>
+        <tbody>
+          <tr><td><code>quetrex-factory</code></td><td>Engine — every repo</td></tr>
+          <tr><td><code>quetrex-nextjs</code></td><td>Next.js repos</td></tr>
+          <tr><td><code>quetrex-python</code></td><td>Python repos</td></tr>
+          <tr><td><code>quetrex-rust</code></td><td>Rust repos</td></tr>
+          <tr><td><code>quetrex-swift</code></td><td>Swift repos</td></tr>
+        </tbody>
+      </table>
+      <p style="font-size:8.6pt;color:var(--muted);margin-top:-4px;">Engine everywhere; exactly one stack pack per repo, pinned in <code>.claude/settings.json</code>.</p>
+
+      <h4>The pipeline</h4>
+      <p style="font-size:9pt;">architect → developer(s) → QA → reviewer → security-reviewer → git-workflow</p>
+    </div>
+  </div>
+
+  <h3>Key gotchas</h3>
+  <div class="callout warn">
+    <span class="tag">1 · Run AUTO mode, not skip-permissions</span>
+    <code>--dangerously-skip-permissions</code> is for throwaway VMs only. AUTO mode keeps the classifier and guard hooks live while removing prompts. Set <code>"defaultMode":"auto"</code> in <strong>your own</strong> <code>~/.claude/settings.json</code> — a project can't grant auto.
+  </div>
+  <div class="callout warn">
+    <span class="tag">2 · Merge is automatic</span>
+    No <code>/quetrex-task-merge</code> for routine work. Clean reviews auto-merge; only escalated/risky PRs need your hand on GitHub. Only production deploy is manual.
+  </div>
+  <div class="callout warn">
+    <span class="tag">3 · Update with native /plugin update</span>
+    There is no <code>/quetrex-update</code>. Use <code>/plugin update</code>.
+  </div>
+  <div class="callout warn">
+    <span class="tag">4 · One stack pack per repo</span>
+    <code>quetrex-factory</code> on every repo; enable only the stack pack that matches. Never two stack packs on the same repo.
+  </div>
+
+  <div class="callout">
+    <span class="tag">Remember</span>
+    Compute is bring-your-own — Quetrex is the framework, your Claude subscription is the engine. Guarantees are hooks reading files, not agents' promises. Observe the board; act only at the gates.
+  </div>
+</section>
+
+</body>
+</html>

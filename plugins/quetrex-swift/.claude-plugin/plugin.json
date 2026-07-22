@@ -1,0 +1,8 @@
+{
+  "name": "quetrex-swift",
+  "version": "0.1.0",
+  "description": "Swift pack: swiftlint + swift build + swift test verify chain, concurrency/actor-aware architect guidance, and Keychain/URLSession/ATS security lenses.",
+  "author": {
+    "name": "Glori Holdings"
+  }
+}

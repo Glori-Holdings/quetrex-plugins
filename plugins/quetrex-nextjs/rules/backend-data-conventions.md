@@ -33,7 +33,7 @@ The schema in `src/db/schema/*.ts` is the one source of truth for the database s
 
 - **`drizzle-kit push` is banned** outside a throwaway local scratch DB. It mutates the database directly with no reviewable, replayable artifact and no history. It is denied in CI/deploy, and `deny-guard.sh` blocks it even inside the `bypassPermissions` developer agent. Do not reach for it.
 - **Never edit an applied migration.** Once a migration has run anywhere shared, it is immutable. Fix-forward with a new migration.
-- **Never run migrations at app boot or in the request path.** Migrations run in a release/CI step (Fly `release_command`, or `pnpm db:migrate` gated before a Vercel promote), never inside `next start` or a route handler.
+- **Never run migrations at app boot or in the request path.** Migrations run in a release/CI step (Fly `release_command`), never inside `next start` or a route handler.
 - **Destructive changes (drop / rename / narrow a column) require a hand-written expand → migrate-data → contract sequence**, staging-tested. Because `release_command` migrations are forward-only, every migration must be backward-compatible with the previously-deployed image (the old code runs against the new schema during a rolling/bluegreen shift).
 - The read-only **drift guard** (`pnpm db:check` + `pnpm db:drift`) in `pnpm verify` fails the build if `schema.ts` changed without a committed migration — the most common Drizzle production incident. `db-drift.sh` generates into a throwaway temp copy and never mutates the tracked migrations dir.
 - **`src/db/migrations/**` is off-limits** to hand-editing — it is generated output.
@@ -42,27 +42,28 @@ The schema in `src/db/schema/*.ts` is the one source of truth for the database s
 
 ---
 
-## 2. Neon — driver by runtime, pooled vs unpooled
+## 2. Neon — long-lived pool, pooled vs unpooled
 
-The database handle is created **once** in a `server-only` module and reused. Which driver depends on the deploy runtime.
+The database handle is created **once** in a `server-only` module and reused for the process lifetime. The app ships to Fly.io as a standalone Node server (a long-lived process), so use a **module-level** connection pool — not an HTTP-per-query client.
 
 ```typescript
 // src/db/index.ts
 import 'server-only'
-import { drizzle } from 'drizzle-orm/neon-http'   // stateless HTTP — Vercel / edge / one-shot serverless
-import { neon } from '@neondatabase/serverless'
+import { drizzle } from 'drizzle-orm/neon-serverless'   // WebSocket Pool — long-lived Fly Node process
+import { Pool } from '@neondatabase/serverless'
 import { env } from '@/env'
 import * as schema from './schema'
 
-export const db = drizzle(neon(env.DATABASE_URL), { schema })
+// One module-level pool over the POOLED host, reused for the process lifetime.
+const pool = new Pool({ connectionString: env.DATABASE_URL })
+export const db = drizzle(pool, { schema })
 ```
 
-- **Vercel / serverless / edge:** `drizzle-orm/neon-http` over `@neondatabase/serverless`. Stateless HTTP per query — the right fit for functions that spin up and die. Note: `neon-http` does **not** support interactive multi-statement transactions; if a task genuinely needs `db.transaction()` on a serverless runtime, use `drizzle-orm/neon-serverless` (a WebSocket `Pool`) for those calls.
-- **Fly.io / any long-lived Node process:** one **module-level** `neon-serverless` `Pool` (or `postgres-js`) over the pooled host, reused for the process lifetime. An HTTP-per-query client wastes round-trips for a persistent server, and a per-request `Pool` exhausts connections.
+- **Fly.io / any long-lived Node process:** one **module-level** `neon-serverless` `Pool` (or `postgres-js`) over the pooled host, reused for the process lifetime. It supports interactive multi-statement transactions (`db.transaction()`), which the app needs for safe multi-step writes. A per-request `Pool` exhausts connections — create it once at module scope.
 
 **Pooled vs unpooled — the load-bearing distinction:**
 
-- **App runtime → pooled host** (the `-pooler` hostname / PgBouncer). Serverless functions and many concurrent workers must go through the pooler or they exhaust Postgres's connection ceiling.
+- **App runtime → pooled host** (the `-pooler` hostname / PgBouncer). Many concurrent workers must go through the pooler or they exhaust Postgres's connection ceiling.
 - **Migrations → direct / unpooled host** (`DATABASE_URL_UNPOOLED`). PgBouncer's transaction pooling mode breaks the session-level operations migrations rely on (advisory locks, some DDL). Point `drizzle.config.ts` at `DATABASE_URL_UNPOOLED`, and keep `DATABASE_URL` (pooled) for the app.
 
 Both URLs are validated in `src/env.ts` (§5) — never read either directly from `process.env`.
@@ -71,7 +72,7 @@ Both URLs are validated in `src/env.ts` (§5) — never read either directly fro
 
 ## 3. Upstash Redis — namespaced, TTL'd, fail-closed
 
-**PREFER Redis only when the task needs cache, rate-limiting, sessions, or idempotency.** Most CRUD features need none. When it is warranted, use the Upstash HTTP client on **both** Fly and Vercel — one client, no ioredis/HTTP split. `@upstash/redis` speaks HTTP, so it works identically in a serverless function and a long-lived Fly process, and it never holds a TCP connection that a serverless invocation would leak.
+**PREFER Redis only when the task needs cache, rate-limiting, sessions, or idempotency.** Most CRUD features need none. When it is warranted, use the Upstash HTTP client on Fly — `@upstash/redis` speaks HTTP, so it works cleanly in a long-lived Fly process and never holds a TCP connection to leak. One client, no ioredis/HTTP split.
 
 ```typescript
 // src/lib/redis.ts

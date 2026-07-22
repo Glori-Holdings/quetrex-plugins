@@ -16,9 +16,9 @@ The engine runs the pipeline (`architect → developer(s) → QA → reviewer �
 | **Project `CLAUDE.md`** | Lean ~110-line, 6-section skeleton (Stack · Verification · Architecture · Conventions · Off-limits · LESSONS) | Always-true stack facts only. Orchestrator / pipeline / workflow prose stays in global `~/.claude/CLAUDE.md` — never duplicated per repo. |
 | **Path-scoped rules** | `.claude/rules/data-layer.md`, `.claude/rules/client-boundary.md` | Context-heavy RSC + data-layer guidance loads only when the agent touches `src/db/**` or `app/**` — the always-loaded core stays lean. |
 | **Toolchain templates** | `tsconfig.json` (strict + `noUncheckedIndexedAccess`), `eslint.config.mjs` (ESLint 9 flat), `package.json` scripts, `scripts/db-drift.sh` | The exact config the verify chain depends on. One linter (ESLint), one formatter (Prettier) — no Biome. |
-| **Skills** | `shadcn-add`, `drizzle-migrate`, `deploy` (Fly \| Vercel) | Encode taste the model lacks or make a fragile op reproducible. `qa-verify` / `worktree-cleanup` come from the engine. |
+| **Skills** | `shadcn-add`, `drizzle-migrate`, `deploy` (Fly.io) | Encode taste the model lacks or make a fragile op reproducible. `qa-verify` / `worktree-cleanup` come from the engine. |
 | **Conventions** | Drizzle DAL + migration discipline · TanStack `queryOptions()` factory + non-zero `staleTime` · Upstash Redis namespaced+TTL keys, fail-closed rate limit · authN→authZ→validate · `import 'server-only'` guards | The correctness rules the reviewer and security-reviewer enforce **when a lib is actually used** (see below). |
-| **Deploy flow** | Fly.io standalone-Docker primary (Vercel secondary) + the ephemeral per-branch **preview/E2E** flow | Playwright can't test async RSC in-process — E2E must run against a live preview URL. |
+| **Deploy flow** | Fly.io standalone-Docker deploy + the ephemeral per-branch **preview/E2E** flow | Playwright can't test async RSC in-process — E2E must run against a live preview URL. |
 
 ### The stack
 
@@ -26,7 +26,7 @@ The engine runs the pipeline (`architect → developer(s) → QA → reviewer �
 - **Tailwind v4** (CSS-first) + **shadcn/ui** · **Framer Motion** (`motion/react`)
 - **TanStack Query** — server state · **Zustand** — client / UI state (never mix the two)
 - **Drizzle ORM** on **Neon/Postgres** · **Zod v4** at every trust boundary
-- **Upstash Redis** — `@upstash/redis` + `@upstash/ratelimit`, HTTP transport. **One client on Fly AND Vercel** — no ioredis split, no connection-exhaustion footgun.
+- **Upstash Redis** — `@upstash/redis` + `@upstash/ratelimit`, HTTP transport. **One HTTP client on Fly** — no ioredis split, no connection-exhaustion footgun.
 - Package manager: **pnpm**
 
 ---
@@ -110,9 +110,7 @@ Locally the same chain is the `pnpm verify` script; the gate and a human run the
 
 ## Fly.io preview & E2E flow
 
-Playwright can't exercise async RSC in-process, so E2E runs against a **live preview URL**. Fly.io is primary; Vercel is the secondary path.
-
-### Fly (primary)
+Playwright can't exercise async RSC in-process, so E2E runs against a **live preview URL** — an ephemeral per-branch Fly app. There is no other path.
 
 For each branch under test the pipeline stands up a **fully ephemeral** preview and tears it **all** down afterward:
 
@@ -121,15 +119,11 @@ For each branch under test the pipeline stands up a **fully ephemeral** preview 
 3. **E2E** — `playwright test` runs against the **live preview URL** (not localhost). This is where async RSC, Server Actions, Redis rate-limits, and real DB reads get proven.
 4. **Teardown — MANDATORY, never leaked.** `fly apps destroy <ephemeral-app>` **and** delete the Neon branch. A preview is created and destroyed within the run; nothing survives it.
 
-**Load-bearing invariants (Fly):**
+**Load-bearing invariants:**
 
 - **`NEXT_SERVER_ACTIONS_ENCRYPTION_KEY` is a pinned Fly secret passed as a Docker build `ARG`.** Without a pinned key, multi-machine App Router apps fail Server Actions non-deterministically ("Failed to find Server Action"). Same for `NEXT_PUBLIC_*` — inlined at build → `--build-arg`, not runtime env.
 - **Per-company `FLY_API_TOKEN`, sourced inline — never `fly auth login`.** Grep the token from the project vault, source it in-memory, confirm with `FLY_API_TOKEN="$TOK" fly status --app <app>` before anything, never persist it. The interactive login can't see a given company's apps.
 - **Pooled vs unpooled:** the app runtime uses the **pooled** (`-pooler`) Neon host; migrations use the **direct/unpooled** host (`drizzle.config.ts` → `DATABASE_URL_UNPOOLED`).
-
-### Vercel (secondary)
-
-Vercel builds Next natively (no Dockerfile) and gives every branch an **automatic preview URL** — Playwright targets that. Migrations run from CI or an explicit `pnpm db:migrate` **before** `vercel deploy --prod`, gated so a migration failure stops the promote. No release phase, so migrations stay backward-compatible.
 
 ### Production deploy
 
@@ -151,7 +145,7 @@ Deploy is a **human-triggered terminal command** (`/deploy [staging|production|r
 │   └── skills/
 │       ├── shadcn-add/SKILL.md
 │       ├── drizzle-migrate/SKILL.md
-│       └── deploy/SKILL.md        # Fly | Vercel branch
+│       └── deploy/SKILL.md        # Fly.io deploy
 ├── tsconfig.json                 # strict + noUncheckedIndexedAccess
 ├── eslint.config.mjs             # ESLint 9 flat, eslint-config-next
 ├── package.json                  # verify + per-step scripts

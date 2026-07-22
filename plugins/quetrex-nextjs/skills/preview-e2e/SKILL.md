@@ -1,6 +1,6 @@
 ---
 name: preview-e2e
-description: Stand up an EPHEMERAL, production-fidelity preview and run Playwright E2E against its live URL, then tear it ALL down. Use in QA when a task changes user-facing behavior, Server Actions, routes, or data flow — async Server Components and the RSC/client boundary can only be proven end-to-end. Fly-primary (per-branch app + fresh seeded Neon branch); Vercel path uses the automatic preview URL. Teardown is mandatory — never leak a Fly app or a Neon branch.
+description: Stand up an EPHEMERAL, production-fidelity preview and run Playwright E2E against its live URL, then tear it ALL down. Use in QA when a task changes user-facing behavior, Server Actions, routes, or data flow — async Server Components and the RSC/client boundary can only be proven end-to-end. An ephemeral per-branch Fly app + a fresh seeded Neon branch. Teardown is mandatory — never leak a Fly app or a Neon branch.
 allowed-tools: Bash, Read, mcp__playwright
 ---
 
@@ -10,7 +10,7 @@ QA's live-URL gate. Vitest cannot render **async** Server Components and `next b
 
 **Golden rule: never leak.** Every provisioned Fly app and Neon branch is torn down in a `trap`, even on failure or interrupt. A dangling preview app burns money and a dangling Neon branch counts against the project's branch quota. End every run with the §6 leak audit.
 
-**Fly is primary** (standalone Docker image = the deploy artifact you ship). **Vercel is the secondary path** (§7) and uses its automatic per-PR preview URL — no app to create, but the Neon branch and teardown discipline are identical.
+**The preview is an ephemeral Fly app** — the same standalone Docker image you ship to prod, wired to a fresh seeded Neon branch. That is the only path; there is no non-Fly alternative.
 
 ---
 
@@ -27,7 +27,7 @@ QA's live-URL gate. Vitest cannot render **async** Server Components and `next b
 - Required build/runtime inputs (pull from the vault, never hardcode):
   - `NEXT_SERVER_ACTIONS_ENCRYPTION_KEY` — **must** be a pinned value passed as a Docker **build ARG** (not just runtime env). Multi-machine App Router apps otherwise fail Server Actions non-deterministically ("Failed to find Server Action"). Pin the SAME key for the whole preview.
   - Any `NEXT_PUBLIC_*` — inlined at build time → passed as `--build-arg`, not runtime secret. The preview URL is deterministic from the app name, so `NEXT_PUBLIC_APP_URL` is known before deploy.
-  - `UPSTASH_REDIS_REST_URL` / `UPSTASH_REDIS_REST_TOKEN` (same Upstash HTTP client on Fly and Vercel). Use a **preview-namespaced** key prefix so ephemeral traffic never collides with staging (`app:rl:preview:<branch>`).
+  - `UPSTASH_REDIS_REST_URL` / `UPSTASH_REDIS_REST_TOKEN` (the Upstash HTTP client, running on Fly). Use a **preview-namespaced** key prefix so ephemeral traffic never collides with staging (`app:rl:preview:<branch>`).
 
 Name everything deterministically off the branch/PR so a re-run reuses (or cleanly replaces) rather than piling up:
 ```bash
@@ -167,19 +167,6 @@ pnpm dlx neonctl@latest branches list --project-id "$NEON_PROJECT" | grep -F "$N
   && echo "LEAK: neon branch survived" || echo "neon clean"
 ```
 If either survived, destroy it explicitly and re-audit. Do not report the task green while a preview resource is leaking.
-
----
-
-## 7. Vercel path (secondary)
-
-When the project deploys to Vercel, the preview URL is **automatic** — every push to the PR branch gets one; there is no Fly app to create or destroy.
-
-1. **Neon branch:** if the Neon⇄Vercel integration is wired, the preview branch is auto-created and `DATABASE_URL` is injected per-environment — still run `drizzle-kit migrate` (DIRECT url) + seed against it. If not wired, create the branch exactly as §1 and set it on the Vercel Preview environment.
-2. **Get the live URL** from the deployment (the ready Preview URL), then wait for `/api/health`.
-3. **Run Playwright** against it exactly as §3, assert §3's happy + unhappy paths, and run the §4 negative control.
-4. **Teardown:** Vercel previews expire on their own, but the **Neon branch does not** — delete it (§5) and run the §6 audit for the branch. Same fail-closed / no-leak discipline.
-
-`NEXT_SERVER_ACTIONS_ENCRYPTION_KEY` still matters on Vercel (set it in the Preview environment); `NEXT_PUBLIC_*` are inlined by Vercel's build. No Dockerfile on the Vercel path — Vercel builds Next natively.
 
 ---
 

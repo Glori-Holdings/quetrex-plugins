@@ -6,7 +6,12 @@
     "name": "Glori Holdings"
   },
   "agents": [
-    "./agents/"
-  ],
-  "hooks": "./hooks/hooks.json"
+    "./agents/architect.md",
+    "./agents/database-architect.md",
+    "./agents/developer.md",
+    "./agents/git-workflow.md",
+    "./agents/qa.md",
+    "./agents/reviewer.md",
+    "./agents/security-reviewer.md"
+  ]
 }

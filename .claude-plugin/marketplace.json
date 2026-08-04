@@ -3,14 +3,29 @@
   "owner": {
     "name": "Glori Holdings"
   },
-  "description": "The Quetrex agentic build system: a stack-agnostic pipeline engine plus per-language add-on packs. Every quality/security/process guarantee is enforced by a deterministic hook reading an on-disk artifact, never by agent prose. Private marketplace — github.com/Glori-Holdings/quetrex-plugins.",
+  "description": "Quetrex — an enforcement-first AI build system. Install quetrex to run work from your kanban; the guarded agent pipeline comes with it. Add a stack pack for your language.",
   "version": "1.0.0",
   "plugins": [
+    {
+      "name": "quetrex",
+      "source": {
+        "source": "github",
+        "repo": "Glori-Holdings/quetrex-base"
+      },
+      "version": "2.0.0",
+      "description": "Drive your Quetrex board from your editor. Create, refine, build, merge, and deploy tasks with /quetrex:* commands. Installs the build engine (quetrex-factory) automatically — start here.",
+      "author": { "name": "Glori Holdings" },
+      "homepage": "https://github.com/Glori-Holdings/quetrex-plugins",
+      "license": "UNLICENSED",
+      "keywords": ["quetrex", "kanban", "commands", "pipeline", "start-here"],
+      "strict": true,
+      "defaultEnabled": true
+    },
     {
       "name": "quetrex-factory",
       "source": "./plugins/quetrex-factory",
       "version": "1.0.0",
-      "description": "Stack-agnostic engine: architect -> developer(s) -> QA -> reviewer -> security-reviewer -> git-workflow, with a right-size router, bounded self-heal loops, and hook-enforced merge gates. verify-gate blocks 'done' while typecheck/lint/build/tests are red; the security-reviewer OWASP checklist hard-blocks on any Critical.",
+      "description": "The guarded AI build engine. Specialist agents — architect → developers → QA → reviewer → security — carry each task to a reviewed, merged PR, with hooks that block anything red, unreviewed, or insecure from shipping. Stack-agnostic; add a stack pack for your language.",
       "author": { "name": "Glori Holdings" },
       "homepage": "https://github.com/Glori-Holdings/quetrex-plugins",
       "license": "UNLICENSED",
@@ -22,7 +37,7 @@
       "name": "quetrex-nextjs",
       "source": "./plugins/quetrex-nextjs",
       "version": "0.1.0",
-      "description": "Next.js stack pack: App Router/RSC conventions (TypeScript strict, Tailwind/shadcn, TanStack Query + Zustand, Drizzle on Neon, Upstash Redis), the tsc -> eslint -> next build -> drizzle -> vitest -> playwright verify chain, Fly-primary ephemeral preview + E2E with mandatory teardown, and shadcn-add / drizzle-migrate skills. Layers on quetrex-factory.",
+      "description": "Next.js stack pack. App Router / TypeScript conventions + the tsc → eslint → next build → tests → Playwright E2E verify chain. Enable in a Next.js repo.",
       "author": { "name": "Glori Holdings" },
       "homepage": "https://github.com/Glori-Holdings/quetrex-plugins",
       "license": "UNLICENSED",
@@ -34,7 +49,7 @@
       "name": "quetrex-python",
       "source": "./plugins/quetrex-python",
       "version": "0.1.0",
-      "description": "Python pack: ruff + mypy/pyright + pytest verify chain, packaging/venv-aware architect guidance, and injection/deserialization/secret security lenses. Layers on quetrex-factory.",
+      "description": "Python stack pack. The ruff → mypy → pytest verify chain + Python-aware security lenses. Enable in a Python repo.",
       "author": { "name": "Glori Holdings" },
       "homepage": "https://github.com/Glori-Holdings/quetrex-plugins",
       "license": "UNLICENSED",
@@ -46,7 +61,7 @@
       "name": "quetrex-rust",
       "source": "./plugins/quetrex-rust",
       "version": "0.1.0",
-      "description": "Rust pack: cargo fmt + clippy -D warnings + build + test verify chain, ownership/lifetime-aware architect guidance, and unsafe-block/panic security lenses. Layers on quetrex-factory.",
+      "description": "Rust stack pack. The cargo fmt → clippy → build → test verify chain + ownership/unsafe security lenses. Enable in a Rust repo.",
       "author": { "name": "Glori Holdings" },
       "homepage": "https://github.com/Glori-Holdings/quetrex-plugins",
       "license": "UNLICENSED",
@@ -58,7 +73,7 @@
       "name": "quetrex-swift",
       "source": "./plugins/quetrex-swift",
       "version": "0.1.0",
-      "description": "Swift pack: swiftlint + swift build + swift test verify chain, concurrency/actor-aware architect guidance, and Keychain/URLSession/ATS security lenses. Layers on quetrex-factory.",
+      "description": "Swift stack pack. The swiftlint → swift build → swift test verify chain + Keychain/URLSession/ATS security lenses. Enable in a Swift repo.",
       "author": { "name": "Glori Holdings" },
       "homepage": "https://github.com/Glori-Holdings/quetrex-plugins",
       "license": "UNLICENSED",

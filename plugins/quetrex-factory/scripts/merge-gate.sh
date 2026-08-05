@@ -207,6 +207,34 @@ while IFS= read -r seg; do
       BR=$(git branch --show-current 2>/dev/null)
     fi
     if [ "$BR" = "master" ] || [ "$BR" = "main" ]; then
+      # SYNCING the protected branch from its OWN upstream is not a ship.
+      # `git merge --ff-only origin/main` while on main brings down commits that
+      # ALREADY went through a PR and this very gate; there is nothing left to
+      # gate, and the artifacts on disk describe a feature branch that is now
+      # merged. Denying it blocked the routine post-merge return to main — which
+      # is a large part of why post-merge cleanup never became automatic, and
+      # why `git pull` on main was reported as "the gate blocking everything".
+      #
+      # Exempt only when EVERY ref argument is this branch's own remote-tracking
+      # ref (origin/main, upstream/main, @{u}). A merge of anything else into
+      # main — a feature branch, a sha, another branch's ref — is still a ship
+      # and is still gated.
+      merge_args=$(printf '%s' "$norm" | sed -e 's/.*[[:space:]]merge//')
+      sync_only=1; have_ref=0
+      for a in $merge_args; do
+        case "$a" in
+          -*) continue ;;
+        esac
+        have_ref=1
+        case "$a" in
+          '@{u}'|'@{upstream}') ;;
+          */"$BR") ;;
+          *) sync_only=0 ;;
+        esac
+      done
+      if [ "$have_ref" -eq 1 ] && [ "$sync_only" -eq 1 ]; then
+        continue
+      fi
       is_merge_vector=1; merge_kind="merge into main"; VECTOR_SEG="$norm"; break
     fi
   fi

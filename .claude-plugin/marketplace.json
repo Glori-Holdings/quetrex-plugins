@@ -12,7 +12,7 @@
         "source": "github",
         "repo": "Glori-Holdings/quetrex-base"
       },
-      "version": "2.1.0",
+      "version": "2.2.0",
       "description": "Drive your Quetrex board from your editor. Create, refine, build, merge, and deploy tasks with /quetrex:* commands. Installs the build engine (quetrex-factory) automatically — start here.",
       "author": {
         "name": "Glori Holdings"
@@ -32,7 +32,7 @@
     {
       "name": "quetrex-factory",
       "source": "./plugins/quetrex-factory",
-      "version": "1.2.1",
+      "version": "1.3.0",
       "description": "The guarded AI build engine. Specialist agents — architect → developers → QA → reviewer → security — carry each task to a reviewed, merged PR, with hooks that block anything red, unreviewed, or insecure from shipping. Stack-agnostic; add a stack pack for your language.",
       "author": {
         "name": "Glori Holdings"

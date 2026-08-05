@@ -12,24 +12,41 @@
         "source": "github",
         "repo": "Glori-Holdings/quetrex-base"
       },
-      "version": "2.0.2",
+      "version": "2.0.3",
       "description": "Drive your Quetrex board from your editor. Create, refine, build, merge, and deploy tasks with /quetrex:* commands. Installs the build engine (quetrex-factory) automatically — start here.",
-      "author": { "name": "Glori Holdings" },
+      "author": {
+        "name": "Glori Holdings"
+      },
       "homepage": "https://github.com/Glori-Holdings/quetrex-plugins",
       "license": "UNLICENSED",
-      "keywords": ["quetrex", "kanban", "commands", "pipeline", "start-here"],
+      "keywords": [
+        "quetrex",
+        "kanban",
+        "commands",
+        "pipeline",
+        "start-here"
+      ],
       "strict": true,
       "defaultEnabled": true
     },
     {
       "name": "quetrex-factory",
       "source": "./plugins/quetrex-factory",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "description": "The guarded AI build engine. Specialist agents — architect → developers → QA → reviewer → security — carry each task to a reviewed, merged PR, with hooks that block anything red, unreviewed, or insecure from shipping. Stack-agnostic; add a stack pack for your language.",
-      "author": { "name": "Glori Holdings" },
+      "author": {
+        "name": "Glori Holdings"
+      },
       "homepage": "https://github.com/Glori-Holdings/quetrex-plugins",
       "license": "UNLICENSED",
-      "keywords": ["pipeline", "agents", "code-review", "security-review", "verification-gate", "stack-agnostic"],
+      "keywords": [
+        "pipeline",
+        "agents",
+        "code-review",
+        "security-review",
+        "verification-gate",
+        "stack-agnostic"
+      ],
       "strict": true,
       "defaultEnabled": true
     },
@@ -38,10 +55,19 @@
       "source": "./plugins/quetrex-nextjs",
       "version": "0.1.0",
       "description": "Next.js stack pack. App Router / TypeScript conventions + the tsc → eslint → next build → tests → Playwright E2E verify chain. Enable in a Next.js repo.",
-      "author": { "name": "Glori Holdings" },
+      "author": {
+        "name": "Glori Holdings"
+      },
       "homepage": "https://github.com/Glori-Holdings/quetrex-plugins",
       "license": "UNLICENSED",
-      "keywords": ["nextjs", "typescript", "react", "drizzle", "tailwind", "stack-pack"],
+      "keywords": [
+        "nextjs",
+        "typescript",
+        "react",
+        "drizzle",
+        "tailwind",
+        "stack-pack"
+      ],
       "strict": true,
       "defaultEnabled": false
     },
@@ -50,10 +76,18 @@
       "source": "./plugins/quetrex-python",
       "version": "0.1.0",
       "description": "Python stack pack. The ruff → mypy → pytest verify chain + Python-aware security lenses. Enable in a Python repo.",
-      "author": { "name": "Glori Holdings" },
+      "author": {
+        "name": "Glori Holdings"
+      },
       "homepage": "https://github.com/Glori-Holdings/quetrex-plugins",
       "license": "UNLICENSED",
-      "keywords": ["python", "pytest", "ruff", "mypy", "stack-pack"],
+      "keywords": [
+        "python",
+        "pytest",
+        "ruff",
+        "mypy",
+        "stack-pack"
+      ],
       "strict": true,
       "defaultEnabled": false
     },
@@ -62,10 +96,17 @@
       "source": "./plugins/quetrex-rust",
       "version": "0.1.0",
       "description": "Rust stack pack. The cargo fmt → clippy → build → test verify chain + ownership/unsafe security lenses. Enable in a Rust repo.",
-      "author": { "name": "Glori Holdings" },
+      "author": {
+        "name": "Glori Holdings"
+      },
       "homepage": "https://github.com/Glori-Holdings/quetrex-plugins",
       "license": "UNLICENSED",
-      "keywords": ["rust", "cargo", "clippy", "stack-pack"],
+      "keywords": [
+        "rust",
+        "cargo",
+        "clippy",
+        "stack-pack"
+      ],
       "strict": true,
       "defaultEnabled": false
     },
@@ -74,10 +115,17 @@
       "source": "./plugins/quetrex-swift",
       "version": "0.1.0",
       "description": "Swift stack pack. The swiftlint → swift build → swift test verify chain + Keychain/URLSession/ATS security lenses. Enable in a Swift repo.",
-      "author": { "name": "Glori Holdings" },
+      "author": {
+        "name": "Glori Holdings"
+      },
       "homepage": "https://github.com/Glori-Holdings/quetrex-plugins",
       "license": "UNLICENSED",
-      "keywords": ["swift", "swiftpm", "swiftlint", "stack-pack"],
+      "keywords": [
+        "swift",
+        "swiftpm",
+        "swiftlint",
+        "stack-pack"
+      ],
       "strict": true,
       "defaultEnabled": false
     }

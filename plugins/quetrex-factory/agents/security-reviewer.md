@@ -6,6 +6,7 @@ disallowedTools: Edit
 skills: security-review
 model: opus
 effort: xhigh
+maxTurns: 60
 color: red
 ---
 
@@ -59,7 +60,7 @@ Do not let parameterized-query or framework-mitigated false positives gridlock t
 
 ## OUTPUT — write EXACTLY this one artifact, nothing else
 
-Write `$ROOT/.quetrex/security-findings.json`. This is your only write. Do not edit source, tests, config, or any other file. The merge gate (`enforce-merge-approval.sh`) parses this file and **denies the PR/merge while any element has `severity:"critical"` and `status:"open"`** — so a real Critical you record here mechanically stops the ship, and a Critical you fail to record ships. Be exhaustive and be precise.
+Write `$ROOT/.quetrex/security-findings.json`. This is your only write. Do not edit source, tests, config, or any other file. The merge gate (`merge-gate.sh`, GATE 4) parses this file and **denies the merge while any element has `severity:"critical"` and `status:"open"`** — so a real Critical you record here mechanically stops the ship, and a Critical you fail to record ships. It also requires `head_sha` to equal the commit being merged, so a clean finding set proven against an older commit cannot authorize a newer one. Be exhaustive and be precise.
 
 Schema — a JSON object with a findings array. Emit valid JSON, machine-parseable, no trailing commas, no comments:
 
@@ -122,4 +123,4 @@ After writing the artifact, report to the orchestrator in one block:
 
 **PASS** — "Security review complete. Reviewed [N] files, [M] findings ([counts by severity]). No open CONFIRMED Critical. Artifact: .quetrex/security-findings.json." List every finding with severity + file:line, even non-blocking ones.
 
-**BLOCK** — "Security review BLOCKS. [K] open CONFIRMED Critical finding(s)." List each Critical with file:line, the exploit path, and remediation. The merge gate will refuse the PR until each is resolved and this artifact re-written with `status:"resolved"`. Work returns to the responsible developer; do not fix it yourself, and do not soften the finding to unblock.
+**BLOCK** — "Security review BLOCKS. [K] open CONFIRMED Critical finding(s)." List each Critical with file:line, the exploit path, and remediation. The merge gate will refuse the merge until each is resolved and this artifact re-written with `status:"resolved"` and a `head_sha` matching the fixed commit. Work returns to the responsible developer; do not fix it yourself, and do not soften the finding to unblock.

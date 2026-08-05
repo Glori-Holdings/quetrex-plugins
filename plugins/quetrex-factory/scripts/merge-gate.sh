@@ -75,66 +75,172 @@ fi
 [ -z "$COMMAND" ] && exit 0
 
 # --- is this a merge-to-main vector at all? --------------------------------
-# A git subcommand invoked bare (`git merge`) or with a leading `-C <dir>`
-# (`git -C /worktree push`) — the form this workflow uses inside worktrees.
-GIT_PFX='git([[:space:]]+-C[[:space:]]+[^[:space:]]+)?[[:space:]]+'
+#
+# Evaluated PER INVOCATION, never against the whole command string.
+#
+# THE DEFECT THIS REPLACES. The previous version asked two questions of the
+# entire command: does it contain a `git push`, and does it contain the token
+# `main`. So this — the standard "push a feature branch, then open its PR" —
+#
+#     git -C /wt push -u origin claude/my-feature && gh pr create --base main
+#
+# was classified "push to main" because `--base main` belonged to a DIFFERENT
+# sub-command. Opening a PR for a feature branch is not a merge. It denied with
+# a stale REWORK verdict from an unrelated task, and the workaround (`gh api`)
+# became routine. That is the worst failure mode a ship gate has: one that
+# cries wolf gets bypassed on reflex, and then it is not gating anything.
+#
+# Now: split the command on shell operators, normalize away wrappers, and
+# require the invocation to BEGIN its segment. The token `main` inside another
+# sub-command's flags, a commit message, a PR body, or a heredoc line can no
+# longer trigger the gate — while every genuine vector still does.
+#
+# Residual, and deliberately so: a vector constructed to hide from a regex
+# (git plumbing, a script file, a library binding) is not detected. This gate
+# mechanizes the pipeline's own policy against the pipeline's own commands; it
+# is not a sandbox, and pretending otherwise is what produced the false
+# positives in the first place.
+
+# Split on && || ; and |. awk, not sed: BSD sed does not interpret \n in a
+# replacement, so `sed 's/&&/\n/'` yields a literal "n" on macOS.
+SEGMENTS=$(printf '%s' "$COMMAND" | awk '{gsub(/&&|\|\||;|\|/, "\n"); print}')
+
+# Strip leading wrappers so `sudo git push …`, `FOO=1 git push …` and
+# `bash -c "git push …"` still anchor on the real invocation.
+normalize_segment() {
+  local s="$1" first
+  s=$(printf '%s' "$s" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+  while [ -n "$s" ]; do
+    first="${s%%[[:space:]]*}"
+    case "$first" in
+      sudo|env|eval|command|nohup|time)
+        s="${s#"$first"}" ;;
+      bash|sh|zsh)
+        # bash -c '<payload>' — unwrap the payload, then keep normalizing it.
+        if [[ "$s" =~ ^(bash|sh|zsh)[[:space:]]+-c[[:space:]]+(.*)$ ]]; then
+          s="${BASH_REMATCH[2]}"
+          s="${s#[\"\']}"; s="${s%[\"\']}"
+        else
+          break
+        fi ;;
+      *)
+        # A leading VAR=value assignment only — matched with a regex, not a
+        # case glob: `git commit -m "a=b"` also contains `=`, and stripping to
+        # the first space there would drop the `git` and silently un-detect a
+        # real vector.
+        if [[ "$first" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; then
+          s="${s#"$first"}"
+        else
+          break
+        fi ;;
+    esac
+    s=$(printf '%s' "$s" | sed 's/^[[:space:]]*//')
+  done
+  printf '%s' "$s"
+}
 
 # Tag pushes (deploy/version rollback tags) are exempt — they are not merges.
+# Takes the SEGMENT, not the whole command: a `git tag` earlier in a compound
+# command must not exempt a real push to main later in it.
 is_tag_push() {
-  [[ "$COMMAND" == *"git tag"* ]] || \
-  [[ "$COMMAND" == *"refs/tags/"* ]] || \
-  [[ "$COMMAND" =~ push[[:space:]]+(origin[[:space:]]+)?deploy/ ]] || \
-  [[ "$COMMAND" =~ push[[:space:]]+(origin[[:space:]]+)?v[0-9] ]]
+  local seg="$1"
+  [[ "$seg" == *"refs/tags/"* ]] || \
+  [[ "$seg" =~ ^git([[:space:]]+-C[[:space:]]+[^[:space:]]+)?[[:space:]]+tag([[:space:]]|$) ]] || \
+  [[ "$seg" =~ push[[:space:]]+(--[^[:space:]]+[[:space:]]+)*(origin[[:space:]]+)?deploy/ ]] || \
+  [[ "$seg" =~ push[[:space:]]+(--[^[:space:]]+[[:space:]]+)*(origin[[:space:]]+)?v[0-9] ]]
 }
+
+# Does this segment's own argument list target the protected branch?
+targets_protected_branch() {
+  local seg="$1"
+  [[ "$seg" =~ (^|[[:space:]:/])(master|main)([[:space:]]|$) ]] || \
+  [[ "$seg" =~ :(refs/heads/)?(master|main)([[:space:]]|$) ]]
+}
+
+GIT_ANCHOR='^git([[:space:]]+-C[[:space:]]+[^[:space:]]+)?([[:space:]]+-[^[:space:]]+)*[[:space:]]+'
 
 is_merge_vector=0
 merge_kind=""
+VECTOR_SEG=""
+PENDING_CD=""
 
-# (a) gh pr merge — the primary vector under the new policy.
-if [[ "$COMMAND" == *"gh pr merge"* ]]; then
-  is_merge_vector=1; merge_kind="gh pr merge"
-fi
+while IFS= read -r seg; do
+  [ -z "$seg" ] && continue
+  norm=$(normalize_segment "$seg")
+  [ -z "$norm" ] && continue
 
-# (b) git push targeting master/main (push straight to the protected branch,
-#     including from a feature branch — which enforce-branch does not catch).
-if [ "$is_merge_vector" -eq 0 ] && [[ "$COMMAND" =~ ${GIT_PFX}push ]] && ! is_tag_push; then
-  if [[ "$COMMAND" =~ (^|[[:space:]:/])(master|main)([[:space:]]|$) ]] || \
-     [[ "$COMMAND" =~ :(refs/heads/)?(master|main)([[:space:]]|$) ]]; then
-    is_merge_vector=1; merge_kind="push to main"
+  # Track `cd <dir>` so a later `git merge` in the same compound command is
+  # evaluated against the directory it will actually run in.
+  if [[ "$norm" =~ ^cd[[:space:]]+([^[:space:]]+) ]]; then
+    PENDING_CD=$(printf '%s' "${BASH_REMATCH[1]}" | sed 's/^["'\'']*//; s/["'\'']*$//')
+    continue
   fi
-fi
 
-# (c) git merge while ON master/main (a local merge into the protected branch).
-if [ "$is_merge_vector" -eq 0 ] && [[ "$COMMAND" =~ ${GIT_PFX}merge ]]; then
-  TDIR=""
-  if [[ "$COMMAND" =~ cd[[:space:]]+([^\&\;]+)[[:space:]]*\&\& ]]; then
-    TDIR=$(printf '%s' "${BASH_REMATCH[1]}" | sed 's/^[ "'\'']*//;s/[ "'\'']*$//')
-  elif [[ "$COMMAND" =~ git[[:space:]]+-C[[:space:]]+([^[:space:]]+) ]]; then
-    TDIR="${BASH_REMATCH[1]}"
+  # (a) gh pr merge — the primary vector under the new policy.
+  if [[ "$norm" =~ ^gh[[:space:]]+pr[[:space:]]+merge([[:space:]]|$) ]]; then
+    is_merge_vector=1; merge_kind="gh pr merge"; VECTOR_SEG="$norm"; break
   fi
-  BR=""
-  if [ -n "$TDIR" ] && [ -d "$TDIR" ]; then
-    BR=$(git -C "$TDIR" branch --show-current 2>/dev/null)
-  elif [ -n "$SESSION_CWD" ] && [ -d "$SESSION_CWD" ]; then
-    BR=$(git -C "$SESSION_CWD" branch --show-current 2>/dev/null)
-  else
-    BR=$(git branch --show-current 2>/dev/null)
+
+  # (b) git push whose OWN arguments target master/main (a push straight to the
+  #     protected branch, including from a feature branch — which
+  #     enforce-branch does not catch).
+  if [[ "$norm" =~ ${GIT_ANCHOR}push([[:space:]]|$) ]] && ! is_tag_push "$norm"; then
+    if targets_protected_branch "$norm"; then
+      is_merge_vector=1; merge_kind="push to main"; VECTOR_SEG="$norm"; break
+    fi
   fi
-  if [ "$BR" = "master" ] || [ "$BR" = "main" ]; then
-    is_merge_vector=1; merge_kind="merge into main"
+
+  # (c) git merge while ON master/main (a local merge into the protected branch).
+  if [[ "$norm" =~ ${GIT_ANCHOR}merge([[:space:]]|$) ]]; then
+    TDIR=""
+    if [[ "$norm" =~ git[[:space:]]+-C[[:space:]]+([^[:space:]]+) ]]; then
+      TDIR=$(printf '%s' "${BASH_REMATCH[1]}" | sed 's/^["'\'']*//; s/["'\'']*$//')
+    elif [ -n "$PENDING_CD" ]; then
+      TDIR="$PENDING_CD"
+    fi
+    BR=""
+    if [ -n "$TDIR" ] && [ -d "$TDIR" ]; then
+      BR=$(git -C "$TDIR" branch --show-current 2>/dev/null)
+    elif [ -n "$SESSION_CWD" ] && [ -d "$SESSION_CWD" ]; then
+      BR=$(git -C "$SESSION_CWD" branch --show-current 2>/dev/null)
+    else
+      BR=$(git branch --show-current 2>/dev/null)
+    fi
+    if [ "$BR" = "master" ] || [ "$BR" = "main" ]; then
+      is_merge_vector=1; merge_kind="merge into main"; VECTOR_SEG="$norm"; break
+    fi
   fi
-fi
+done <<< "$SEGMENTS"
 
 # Not a merge-to-main command -> nothing to gate.
 [ "$is_merge_vector" -eq 1 ] || exit 0
 
-# --- resolve repo root (worktree-safe) -------------------------------------
+# --- resolve the repo THIS COMMAND TARGETS (worktree-safe) ------------------
+#
+# THE SECOND DEFECT THIS REPLACES: resolution used to start from
+# CLAUDE_PROJECT_DIR — the SESSION's primary repo — so a command operating on
+# another checkout was judged against the session repo's artifacts. Observed in
+# the wild: branch cleanup in quetrex-plugins denied by quetrex-base's stale
+# review verdict. One repo's REWORK must never block another repo's merge.
+#
+# Order is now most-specific-first: the directory named by the command itself,
+# then the session cwd, and only then the project dir.
+TARGET_DIR=""
+if [[ "$VECTOR_SEG" =~ git[[:space:]]+-C[[:space:]]+([^[:space:]]+) ]]; then
+  TARGET_DIR=$(printf '%s' "${BASH_REMATCH[1]}" | sed 's/^["'\'']*//; s/["'\'']*$//')
+elif [ -n "$PENDING_CD" ]; then
+  TARGET_DIR="$PENDING_CD"
+fi
+
 ROOT=""
-if [ -n "${CLAUDE_PROJECT_DIR:-}" ] && [ -d "$CLAUDE_PROJECT_DIR" ]; then
-  ROOT=$(git -C "$CLAUDE_PROJECT_DIR" rev-parse --show-toplevel 2>/dev/null) || ROOT="$CLAUDE_PROJECT_DIR"
+if [ -n "$TARGET_DIR" ] && [ -d "$TARGET_DIR" ]; then
+  ROOT=$(git -C "$TARGET_DIR" rev-parse --show-toplevel 2>/dev/null)
 fi
 if [ -z "$ROOT" ] && [ -n "$SESSION_CWD" ] && [ -d "$SESSION_CWD" ]; then
   ROOT=$(git -C "$SESSION_CWD" rev-parse --show-toplevel 2>/dev/null)
+fi
+if [ -z "$ROOT" ] && [ -n "${CLAUDE_PROJECT_DIR:-}" ] && [ -d "$CLAUDE_PROJECT_DIR" ]; then
+  ROOT=$(git -C "$CLAUDE_PROJECT_DIR" rev-parse --show-toplevel 2>/dev/null) || ROOT="$CLAUDE_PROJECT_DIR"
 fi
 [ -z "$ROOT" ] && ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
 
@@ -162,6 +268,21 @@ deny() {
 # FAIL-CLOSED: a real quetrex merge with no jq cannot be evaluated -> deny.
 if ! command -v jq >/dev/null 2>&1; then
   deny "MERGE GATE (ESCALATE_HUMAN): jq is not installed, so the merge gate cannot verify the review verdict, verify ledger, or security findings for '$merge_kind'. A merge must never proceed unevaluated. Install jq, then re-run the pipeline's review-gate."
+fi
+
+# --- a --repo pointing somewhere else is not this repo's merge to judge -----
+# `gh pr merge --repo owner/name` can target a repository that is not the one
+# resolved above, and this repo's artifacts say nothing about that one. Judging
+# it by these artifacts is precisely the cross-repo leak fixed above, so refuse
+# to judge it at all — and refuse LOUDLY rather than allowing, because it IS a
+# merge and the gate must never wave one through unevaluated.
+if [ "$merge_kind" = "gh pr merge" ] && [[ "$VECTOR_SEG" =~ --repo[[:space:]=]+([^[:space:]]+) ]]; then
+  GH_REPO=$(printf '%s' "${BASH_REMATCH[1]}" | sed 's/^["'\'']*//; s/["'\'']*$//' | tr 'A-Z' 'a-z')
+  ORIGIN_SLUG=$(git -C "$ROOT" remote get-url origin 2>/dev/null \
+    | sed -e 's#\.git$##' -e 's#.*[:/]\([^/][^/]*/[^/][^/]*\)$#\1#' | tr 'A-Z' 'a-z')
+  if [ -n "$ORIGIN_SLUG" ] && [ -n "$GH_REPO" ] && [ "$GH_REPO" != "$ORIGIN_SLUG" ]; then
+    deny "MERGE GATE (ESCALATE_HUMAN): this command merges a PR in '$GH_REPO', but it is running against a checkout of '$ORIGIN_SLUG'. The gate artifacts here (review verdict, verify ledger, security findings) describe '$ORIGIN_SLUG' and say NOTHING about '$GH_REPO', so it cannot evaluate this merge — and it will not judge one repo by another repo's verdict. Run the merge from inside a checkout of '$GH_REPO' so that repo's own gates apply."
+  fi
 fi
 
 LEDGER="$QDIR/verify-ledger.jsonl"

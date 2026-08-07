@@ -31,6 +31,12 @@
 #      On SubagentStop, if .verifyQuick[] is present and non-empty it is used
 #      instead (a QUICK per-subagent chain) — a strict SUBSET that still blocks
 #      red; it never weakens the gate below the full chain when unconfigured.
+#      Subset-ness is MECHANICALLY ENFORCED here, not assumed: every
+#      verifyQuick entry must be a byte-for-byte member of verify[]. verify.json
+#      is a customer-editable file, so an unchecked verifyQuick would be an
+#      arbitrary REPLACEMENT for the chain (`verifyQuick:["true"]` passes every
+#      SubagentStop). On any mismatch the quick chain is discarded, the FULL
+#      verify[] chain runs, and the block reason says why.
 #      An OPTIONAL sibling field, `requiredEnv`, declares per-command env
 #      dependencies: {"requiredEnv": {"<exact command string from verify[]>":
 #      ["VAR_NAME", ...]}}. See "DECLARATIVE ENV SKIP" below.
@@ -155,7 +161,11 @@ HEAD_SHA=$(git -C "$ROOT" rev-parse HEAD 2>/dev/null)
 CUR_BRANCH=$(git -C "$ROOT" branch --show-current 2>/dev/null)
 
 # On SubagentStop we may run a QUICK subset chain if the project defines one.
+# QUICK_NOTE is set when a declared verifyQuick was REJECTED for not being a
+# subset of verify[]; it is appended to any block reason so the operator sees
+# why the full chain ran.
 QUICK=0
+QUICK_NOTE=""
 [ "$EVENT" = "SubagentStop" ] && QUICK=1
 
 # --- helpers ---------------------------------------------------------------
@@ -178,10 +188,36 @@ resolve_from_verify_json() {
   [ -f "$f" ] || return 1
   # Prefer .verifyQuick[] on SubagentStop when it is present and non-empty;
   # otherwise the full .verify[] chain. Never weaken to quick when unconfigured.
+  #
+  # SUBSET IS ENFORCED, NOT ASSUMED. verify.json lives in the CUSTOMER's repo,
+  # so verifyQuick is an untrusted input on the finish path. Without this check
+  # `"verifyQuick": ["true"]` — or any command not in the full chain — would
+  # pass every SubagentStop, turning the quick chain into an arbitrary
+  # replacement for the gate rather than a narrowing of it. A quick chain may
+  # only ever be a SUBSET of verify[]: every entry must be a member of
+  # verify[], byte-for-byte. On ANY mismatch (a foreign command, a non-array
+  # verify, a missing verify) we do NOT trust it — we run the FULL verify[]
+  # chain instead and say so in the block reason, so the misconfiguration is
+  # visible rather than silently weakening the gate.
   local sel='.verify'
   if [ "$QUICK" -eq 1 ] \
      && jq -e '.verifyQuick | type == "array" and length > 0' "$f" >/dev/null 2>&1; then
-    sel='.verifyQuick'
+    if jq -e '
+          ((.verify // null) | type) == "array"
+          and ((.verifyQuick - .verify) | length) == 0
+        ' "$f" >/dev/null 2>&1; then
+      sel='.verifyQuick'
+    else
+      local foreign
+      foreign=$(jq -r '
+          (.verifyQuick - ((.verify // []) | if type == "array" then . else [] end))
+          | map("`" + (. | tostring) + "`") | join(", ")
+        ' "$f" 2>/dev/null)
+      # Kept to a single line (no embedded newlines) so it can be appended to
+      # a block reason without breaking the <=3-line quiet-output budget.
+      QUICK_NOTE=$(printf ' NOTE: verifyQuick in verify.json is not a subset of verify (offending: %s); ran the FULL verify chain instead.' \
+        "${foreign:-<unparseable>}")
+    fi
   fi
   jq -e "$sel | type == \"array\" and length > 0" "$f" >/dev/null 2>&1 || return 1
   while IFS= read -r line; do
@@ -196,13 +232,24 @@ resolve_from_claude_md() {
   # Extract commands from fenced code blocks that fall under a heading whose
   # text contains "Verification". Awk state machine: track "in verification
   # section" and "inside a fenced block".
+  #
+  # RULE ORDER IS LOAD-BEARING. The fence toggle MUST be evaluated first, and
+  # the heading rule MUST be gated on !infence. A shell comment inside the
+  # fenced block starts with `#` and therefore matches the heading pattern; if
+  # the heading rule ran first it would set insec=0 and `next`, silently
+  # ENDING the section mid-chain and truncating every command below the
+  # comment. That is a fail-open: a subset of the chain runs, reports green,
+  # and is written to the ledger, which merge-gate.sh then reads as
+  # authoritative for the WHOLE chain. With the fence evaluated first and the
+  # heading rule gated on !infence, an in-fence `#` line falls through to the
+  # emit rule, which skips it as a comment and keeps the section open.
   local extracted
   extracted=$(awk '
-    /^#{1,6}[[:space:]]/ {
+    /^[[:space:]]*```/ { infence = !infence; next }
+    (!infence && $0 ~ /^#{1,6}[[:space:]]/) {
       insec = (tolower($0) ~ /verification/) ? 1 : 0
       next
     }
-    /^[[:space:]]*```/ { infence = !infence; next }
     (insec && infence) {
       line = $0
       sub(/^[[:space:]]+/, "", line); sub(/[[:space:]]+$/, "", line)
@@ -482,12 +529,12 @@ fi
 # preserved-failure slot (survives the next invocation, unlike the live
 # $LOG). FAILED_TAIL is deliberately never interpolated here.
 if [ "$n" -lt "$MAX_ATTEMPTS" ]; then
-  block "$(printf 'VERIFY FAILED (attempt %d/%d): `%s` exited %d in %s (branch %s).%s BLOCKS finish — fix the cause; it re-runs on your next stop.\nFull output: %s' \
-    "$n" "$MAX_ATTEMPTS" "$FAILED_CMD" "$FAILED_CODE" "$ROOT" "${CUR_BRANCH:-<detached>}" "$SKIP_NOTE" "$FAILLOG")"
+  block "$(printf 'VERIFY FAILED (attempt %d/%d): `%s` exited %d in %s (branch %s).%s%s BLOCKS finish — fix the cause; it re-runs on your next stop.\nFull output: %s' \
+    "$n" "$MAX_ATTEMPTS" "$FAILED_CMD" "$FAILED_CODE" "$ROOT" "${CUR_BRANCH:-<detached>}" "$QUICK_NOTE" "$SKIP_NOTE" "$FAILLOG")"
 fi
 
 # Cap reached -> escalate. Persist a marker the merge gate reads so red code
 # physically cannot merge even once the agent is finally allowed to stop.
 touch "$ESCALATION" 2>/dev/null
-block "$(printf 'ESCALATE: `%s` is STILL red (exit %d) after %d self-heal attempts in %s (branch %s).%s BLOCKS finish — STOP self-healing.\nFull output: %s\nReport this one-line summary and the log path to the user; do NOT paste command output into your closing message. Wait for direction.' \
-  "$FAILED_CMD" "$FAILED_CODE" "$MAX_ATTEMPTS" "$ROOT" "${CUR_BRANCH:-<detached>}" "$SKIP_NOTE" "$FAILLOG")"
+block "$(printf 'ESCALATE: `%s` is STILL red (exit %d) after %d self-heal attempts in %s (branch %s).%s%s BLOCKS finish — STOP self-healing.\nFull output: %s\nReport this one-line summary and the log path to the user; do NOT paste command output into your closing message. Wait for direction.' \
+  "$FAILED_CMD" "$FAILED_CODE" "$MAX_ATTEMPTS" "$ROOT" "${CUR_BRANCH:-<detached>}" "$QUICK_NOTE" "$SKIP_NOTE" "$FAILLOG")"

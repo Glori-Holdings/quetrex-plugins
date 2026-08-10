@@ -131,18 +131,58 @@ fi
 # shell/gh would do with that same text. None of it moves the boundary
 # itself. Concretely:
 #
+# This list is corrected as of the round that fixed findings 1-4 below (a
+# segment-splitter feeding the parser a TRUNCATED or CORRUPTED string, three
+# distinct ways) — a previous version of this text claimed coverage the code
+# did not actually have; treat any future gap between this comment and the
+# tests in test/merge-gate.test.sh as a bug in ONE of the two, not a license
+# to trust either blindly.
+#
 # COVERED (this hook DOES catch these, and is tested against them): ordinary
-# and accidental cross-repo/cross-commit merges — a `--repo`/`-R` flag in any
-# form gh accepts (separated, attached, `=`-joined, clustered), a repeated
-# flag (last wins), an inherited `GH_REPO` already in this process's own
-# environment, a `GH_REPO=` assignment inline on the SAME command (`GH_REPO=x
-# gh pr merge`, `env GH_REPO=x gh pr merge`), a PR identifier given as a URL,
-# and a backslash-continued command split across physical lines.
+# and accidental cross-repo/cross-commit merges when the vector begins with
+# a BARE, unwrapped `gh pr merge` (see NOT COVERED for what "bare" excludes)
+# — a `--repo`/`-R` flag in any form gh accepts (separated, attached,
+# `=`-joined, clustered with other short flags), a repeated flag (last
+# wins, matching real gh), an inherited `GH_REPO` already in this process's
+# own environment, a `GH_REPO=` assignment inline on the SAME segment
+# (`GH_REPO=x gh pr merge`, `env GH_REPO=x gh pr merge`), a PR identifier
+# given as a URL, a backslash-continued command split across physical
+# lines, a value containing `&&`/`;`/`|`/`#` inside quotes (no longer
+# corrupts the split), and a trailing `#` shell comment (no longer read as
+# real flags). EVERY vector a compound command names is independently
+# evaluated — `<merge> A && <merge> B`, `<merge> A && git push origin
+# main`, and the reverse order, are each fully gated, not just the first.
+#
+# ALSO COVERED, deliberately, as a documented DECISION rather than an
+# oversight: a `--repo` value that still looks like an unexpanded shell
+# variable or command substitution (`$SLUG`, `${SLUG}`, `$(...)`, a
+# backtick expression) is NOT treated as a literal repo name — this hook
+# parses text before a shell would expand it, so it genuinely cannot know
+# what `$SLUG` resolves to. It fails OPEN for that one signal (dropped, not
+# compared) rather than closed, specifically so this engine's own
+# `/quetrex:merge` command — which emits exactly this shape — can pass its
+# own gate; the reasoning and the bounded residual risk are written at
+# looks_like_shell_expr's call site. Where the LITERAL portion of such a
+# value (everything before the first `$`/backtick) already disagrees with
+# this repo's origin, that partial evidence IS still used to deny — an
+# unexpandable SUFFIX doesn't rescue a wrong PREFIX.
 #
 # NOT COVERED, by design, and no amount of further pattern-matching fixes
 # this — it needs either server-side enforcement (branch protection; tracked
 # separately) or literally executing the shell to know the answer, which a
 # PreToolUse hook that runs BEFORE execution structurally cannot do:
+#   - A vector NOT anchored on a bare `gh`/`git` token: a path-qualified
+#     binary (`/opt/homebrew/bin/gh pr merge ...` — reached GitHub for real
+#     during review), an escaped name (`\gh pr merge ...`, a common way to
+#     bypass a shell alias/function), or a wrapper whose OWN flags this
+#     hook doesn't understand (`env -u SOMEVAR gh pr merge ...`, `sudo -E
+#     gh pr merge ...` — normalize_segment strips the bare wrapper WORD but
+#     does not parse the wrapper's own arguments, so a flag sitting between
+#     the wrapper and `gh` defeats the anchor).
+#   - The whole vector wrapped in command substitution or a subshell:
+#     `RESULT=$(gh pr merge ...)`, `(gh pr merge ...)`. The text is present
+#     in the command string, but not in a shape this hook's segment
+#     anchoring recognizes as "a command that begins with gh".
 #   - `export GH_REPO=x; gh pr merge ...` as ONE command whose earlier
 #     segment sets the variable this command then relies on. Bounded in
 #     principle (same command string), but this hook does not track
@@ -161,8 +201,9 @@ fi
 #     command's hook invocation runs, and the "inherited env" check above
 #     catches it then — but that is incidental, not a guarantee this hook
 #     makes.)
-#   - A vector deliberately obfuscated to defeat text matching — git
-#     plumbing, a wrapper script, a library binding, base64/eval tricks.
+#   - A vector deliberately obfuscated to defeat text matching beyond the
+#     above — git plumbing, a wrapper script, a library binding,
+#     base64/eval tricks.
 #
 # A command-string parser answers "does this LOOK like an ordinary or
 # accidental cross-repo/cross-commit merge" — it cannot answer "is there ANY
@@ -182,28 +223,8 @@ fi
 # is not a sandbox, and pretending otherwise is what produced the false
 # positives in the first place.
 
-# --- join backslash-newline continuations BEFORE any splitting -------------
-# A real shell removes a `\` immediately followed by a newline entirely (no
-# extra separation introduced) before it does anything else with the input.
-# Without this, a command split across physical lines —
-#
-#     gh pr merge 7 \
-#       --repo other-org/other-repo --squash
-#
-# — had its SECOND line treated as an unrelated, separately-read segment
-# (the line-by-line SEGMENTS walk below has always split on a bare newline
-# too — see the boundary note above). The `--repo` flag and everything after
-# it was never even reached by the parser: the gate evaluated a naked
-# `gh pr merge 7`, found no cross-repo signal because there genuinely was
-# none in what it looked at, and authorized a merge into a different repo.
-# `sed -e :a -e '/\\$/N; s/\\\n//; ta'` is the portable (GNU- and BSD-sed)
-# idiom for this join: `\n` on the PATTERN side of `s///` is a literal
-# newline on both, unlike `\n` on the REPLACEMENT side (BSD sed emits a
-# literal "n" there — the reason the segment-splitter below never used sed
-# for its own substitution either).
-COMMAND=$(printf '%s' "$COMMAND" | sed -e :a -e '/\\$/N; s/\\\n//; ta')
-
-# --- split on && || ; and | -- OUTSIDE quotes and comments only ------------
+# --- split on && || ; and | -- OUTSIDE quotes and comments, joining --------
+# --- backslash-newline continuations along the way -------------------------
 #
 # THE DEFECT THIS REPLACES. The previous splitter was a quote-BLIND
 # `awk gsub(/&&|\|\||;|\|/, "\n")` over the raw command string. A value that
@@ -226,23 +247,57 @@ COMMAND=$(printf '%s' "$COMMAND" | sed -e :a -e '/\\$/N; s/\\\n//; ta')
 # shared code, because a bash function call per character would cost real
 # time for two different consumers; if the quoting RULES ever change, both
 # functions must change together, and this comment is the reminder.
+#
+# BACKSLASH-NEWLINE CONTINUATIONS are joined HERE, in the SAME character
+# scan, rather than as a separate `sed` pass beforehand. That earlier `sed`
+# pass — `sed -e :a -e '/\\$/N; s/\\\n//; ta'`, once documented here as
+# "the portable (GNU- and BSD-sed) idiom" — was neither portable nor
+# correct, proven by running it against the REAL BSD sed shipped on macOS
+# (not just reasoned about):
+#   - `N` at the LAST line, with no following line to append, is a
+#     documented GNU/BSD divergence: BSD sed's classic behavior is to quit
+#     WITHOUT printing the pattern space. `printf 'X Y \' | sed ...` — a
+#     command that merely ENDS in a lone backslash, e.g. a typo — produced
+#     ZERO BYTES of output. Empty $COMMAND means no segments, means nothing
+#     is ever classified as a vector, means the gate is BLIND to the rest
+#     of the command — including a bare `push origin main` sharing the same
+#     compound line. Worse on macOS, the operator's own machine, than in a
+#     GNU-userland cloud container.
+#   - A DOUBLED trailing backslash (`A \\` + newline + `B`) is an escaped,
+#     LITERAL backslash followed by a real newline in actual shell grammar
+#     — the shell keeps these as TWO separate things. `/\\$/` matches any
+#     line ending in a single `\` regardless of how many precede it, so the
+#     sed version joined this into `A \B`, merging what a real shell keeps
+#     separate — and, per finding 1 below, the SECOND thing can be another
+#     merge command that must be independently evaluated, not silently
+#     concatenated onto the first.
+# A character-scanning state machine gets both right for free: it consumes
+# an escaping backslash together with the SPECIFIC next character it
+# escapes (never re-examining "how many backslashes precede a position"),
+# so `\\` is consumed as one escaped-backslash unit BEFORE the following
+# real newline is ever looked at (line stays split), while a lone `\`
+# directly followed by a newline is recognized and both characters are
+# dropped entirely (line joins, with nothing inserted — matching real
+# shell continuation semantics exactly). This only applies OUTSIDE quotes,
+# matching the specific, reported failure shape; a backslash-newline
+# INSIDE a quoted string is left as literal text, unchanged from before.
 split_segments_quote_aware() {
   # Two `local` statements, same reason as tokenize_argv below: word
   # expansion for the WHOLE `local` command happens before the builtin
   # runs, against the enclosing scope's state -- `n=${#s}` on the same
   # line as `s="$1"` would see `s` as unset under `set -u`.
   local s="$1"
-  local i=0 n=${#s} c two out='' in_sq=0 in_dq=0 in_cm=0 prev
+  local i=0 n=${#s} c two nc out='' in_sq=0 in_dq=0 in_cm=0 have=0
   while [ "$i" -lt "$n" ]; do
     c="${s:$i:1}"
     if [ "$in_cm" -eq 1 ]; then
       out+="$c"
-      [ "$c" = $'\n' ] && in_cm=0
+      if [ "$c" = $'\n' ]; then in_cm=0; have=0; fi
     elif [ "$in_sq" -eq 1 ]; then
-      out+="$c"
+      out+="$c"; have=1
       [ "$c" = "'" ] && in_sq=0
     elif [ "$in_dq" -eq 1 ]; then
-      out+="$c"
+      out+="$c"; have=1
       if [ "$c" = '\' ] && [ $((i + 1)) -lt "$n" ]; then
         i=$((i + 1)); out+="${s:$i:1}"
       elif [ "$c" = '"' ]; then
@@ -250,24 +305,45 @@ split_segments_quote_aware() {
       fi
     else
       case "$c" in
-        "'") in_sq=1; out+="$c" ;;
-        '"') in_dq=1; out+="$c" ;;
+        ' ' | $'\t')
+          out+="$c"; have=0
+          ;;
+        $'\n')
+          out+="$c"; have=0
+          ;;
+        "'") in_sq=1; out+="$c"; have=1 ;;
+        '"') in_dq=1; out+="$c"; have=1 ;;
         '#')
-          # A `#` starts a shell comment only at the START of a word
-          # (preceded by whitespace/start-of-string, outside quotes) — so
-          # `foo#bar` is NOT a comment, matching real shell syntax. A
-          # comment's operator-looking characters must not cause a split.
-          prev="${out: -1}"
-          if [ -z "$out" ] || [ "$prev" = ' ' ] || [ "$prev" = $'\t' ] || [ "$prev" = $'\n' ]; then
+          # A `#` starts a shell comment only at the START of a word --
+          # tracked with the SAME `have` flag tokenize_argv uses (whether
+          # we're currently mid-token), not by inspecting the last emitted
+          # character. Those disagree: `a\ #x` (an ESCAPED space before
+          # `#`) leaves the literal character before `#` a space either
+          # way, but the escape means we're still INSIDE the word "a x" —
+          # `have` correctly stays 1 through an escaped separator (see the
+          # `\` case below), while inspecting `${out: -1}` could not tell
+          # an escaped separator from a real one and wrongly started a
+          # "comment" mid-word. A differential test (DEFECT K) feeds both
+          # functions the same corpus and fails on any disagreement.
+          if [ "$have" -eq 0 ]; then
             in_cm=1
           fi
-          out+="$c"
+          out+="$c"; have=1
           ;;
         '\')
           if [ $((i + 1)) -lt "$n" ]; then
-            out+="$c"; i=$((i + 1)); out+="${s:$i:1}"
+            nc="${s:$((i + 1)):1}"
+            if [ "$nc" = $'\n' ]; then
+              # Genuine continuation: an unescaped backslash immediately
+              # followed by a newline. Drop BOTH characters -- a real shell
+              # removes them entirely, joining the two physical lines with
+              # nothing inserted between them.
+              i=$((i + 1))
+            else
+              out+="$c"; i=$((i + 1)); out+="$nc"; have=1
+            fi
           else
-            out+="$c"
+            out+="$c"; have=1
           fi
           ;;
         '&' | '|')
@@ -278,12 +354,14 @@ split_segments_quote_aware() {
           else
             out+=$'\n'
           fi
+          have=0
           ;;
         ';')
           out+=$'\n'
+          have=0
           ;;
         *)
-          out+="$c"
+          out+="$c"; have=1
           ;;
       esac
     fi
@@ -374,10 +452,38 @@ targets_protected_branch() {
 
 GIT_ANCHOR='^git([[:space:]]+-C[[:space:]]+[^[:space:]]+)?([[:space:]]+-[^[:space:]]+)*[[:space:]]+'
 
+# --- collect EVERY vector in the command, not just the first ---------------
+#
+# THE DEFECT THIS REPLACES. Every previous version of this loop `break`s the
+# instant it finds ONE vector, and everything downstream evaluates only that
+# single (merge_kind, VECTOR_SEG) pair. A compound command naming TWO
+# vectors —
+#
+#     gh pr merge 91 --repo this-repo --squash && \
+#     gh pr merge 17 --repo other-repo --squash
+#
+# — got a real `gh pr view` call logged for BOTH PRs, but the gate only ever
+# evaluated the FIRST: it resolved this-repo's clean artifacts, allowed, and
+# the SECOND `gh pr merge` — into a repo these artifacts say nothing about —
+# rode along, never independently judged. The same shape denies nothing for
+# `<merge> ... && git push origin main` or `git push origin main && <merge>
+# ... --repo other`, in either order. This is the exact situation a team
+# running two PRs in two repos will eventually hit: one command, two ships,
+# and a `break` that only ever looks at the first one.
+#
+# Fixed by NOT breaking: every segment that matches a vector shape is
+# appended to parallel arrays (kind/segment/gh-repo-prefix/pending-cd-at-
+# that-point, since a `cd` earlier in the SAME compound command can affect
+# a LATER vector without affecting an earlier one). Below, evaluate_vector
+# runs the ENTIRE gate pipeline once per collected vector; `deny()` inside
+# it still exits the whole hook immediately on the FIRST failure — the
+# change is that a vector can no longer go unevaluated just because an
+# earlier one in the same command happened to be clean.
 is_merge_vector=0
-merge_kind=""
-VECTOR_SEG=""
-VECTOR_GH_REPO_PREFIX=""
+VECTOR_KINDS=()
+VECTOR_SEGS=()
+VECTOR_GH_REPO_PREFIXES=()
+VECTOR_PENDING_CDS=()
 PENDING_CD=""
 
 while IFS= read -r seg; do
@@ -395,9 +501,12 @@ while IFS= read -r seg; do
 
   # (a) gh pr merge — the primary vector under the new policy.
   if [[ "$norm" =~ ^gh[[:space:]]+pr[[:space:]]+merge([[:space:]]|$) ]]; then
-    is_merge_vector=1; merge_kind="gh pr merge"; VECTOR_SEG="$norm"
-    VECTOR_GH_REPO_PREFIX="$NORM_GH_REPO_PREFIX"
-    break
+    is_merge_vector=1
+    VECTOR_KINDS+=("gh pr merge")
+    VECTOR_SEGS+=("$norm")
+    VECTOR_GH_REPO_PREFIXES+=("$NORM_GH_REPO_PREFIX")
+    VECTOR_PENDING_CDS+=("$PENDING_CD")
+    continue
   fi
 
   # (b) git push whose OWN arguments target master/main (a push straight to the
@@ -405,7 +514,12 @@ while IFS= read -r seg; do
   #     enforce-branch does not catch).
   if [[ "$norm" =~ ${GIT_ANCHOR}push([[:space:]]|$) ]] && ! is_tag_push "$norm"; then
     if targets_protected_branch "$norm"; then
-      is_merge_vector=1; merge_kind="push to main"; VECTOR_SEG="$norm"; break
+      is_merge_vector=1
+      VECTOR_KINDS+=("push to main")
+      VECTOR_SEGS+=("$norm")
+      VECTOR_GH_REPO_PREFIXES+=("")
+      VECTOR_PENDING_CDS+=("$PENDING_CD")
+      continue
     fi
   fi
 
@@ -454,7 +568,12 @@ while IFS= read -r seg; do
       if [ "$have_ref" -eq 1 ] && [ "$sync_only" -eq 1 ]; then
         continue
       fi
-      is_merge_vector=1; merge_kind="merge into main"; VECTOR_SEG="$norm"; break
+      is_merge_vector=1
+      VECTOR_KINDS+=("merge into main")
+      VECTOR_SEGS+=("$norm")
+      VECTOR_GH_REPO_PREFIXES+=("")
+      VECTOR_PENDING_CDS+=("$PENDING_CD")
+      continue
     fi
   fi
 done <<< "$SEGMENTS"
@@ -462,888 +581,970 @@ done <<< "$SEGMENTS"
 # Not a merge-to-main command -> nothing to gate.
 [ "$is_merge_vector" -eq 1 ] || exit 0
 
-# --- resolve the repo THIS COMMAND TARGETS (worktree-safe) ------------------
-#
-# THE SECOND DEFECT THIS REPLACES: resolution used to start from
-# CLAUDE_PROJECT_DIR — the SESSION's primary repo — so a command operating on
-# another checkout was judged against the session repo's artifacts. Observed in
-# the wild: branch cleanup in quetrex-plugins denied by quetrex-base's stale
-# review verdict. One repo's REWORK must never block another repo's merge.
-#
-# Order is now most-specific-first: the directory named by the command itself,
-# then the session cwd, and only then the project dir.
-TARGET_DIR=""
-if [[ "$VECTOR_SEG" =~ git[[:space:]]+-C[[:space:]]+([^[:space:]]+) ]]; then
-  TARGET_DIR=$(printf '%s' "${BASH_REMATCH[1]}" | sed 's/^["'\'']*//; s/["'\'']*$//')
-elif [ -n "$PENDING_CD" ]; then
-  TARGET_DIR="$PENDING_CD"
-fi
+# evaluate_vector <merge_kind> <vector_seg> <gh_repo_prefix> <pending_cd> --
+# runs the ENTIRE gate pipeline (repo resolution through GATE 5) against ONE
+# collected vector. `local` for exactly these four -- the ones the CALLER
+# supplies per-vector -- shadows the loop's own globals of the same name for
+# the body below, which otherwise needs NO changes: every other variable the
+# body sets (ROOT, HEAD_SHA, EFFECTIVE_REPO, VERDICT, and so on) is freshly
+# (re)assigned within this function on every call, so leaving them as plain
+# globals is correct too -- there is nothing to accumulate BETWEEN calls,
+# since evaluate_vector runs each vector one at a time, never concurrently.
+# `deny()` (defined inside, below) still calls `exit` -- a denial on ANY
+# vector must terminate the WHOLE hook immediately, exactly as before; what
+# changed is that reaching the end of this function cleanly now `return`s
+# to the caller's loop instead of `exit`ing the whole script, so a clean
+# vector no longer prevents the NEXT one in the same command from being
+# evaluated at all.
+evaluate_vector() {
+  local merge_kind="$1" VECTOR_SEG="$2" VECTOR_GH_REPO_PREFIX="$3" PENDING_CD="$4"
 
-ROOT=""
-if [ -n "$TARGET_DIR" ] && [ -d "$TARGET_DIR" ]; then
-  ROOT=$(git -C "$TARGET_DIR" rev-parse --show-toplevel 2>/dev/null)
-fi
-if [ -z "$ROOT" ] && [ -n "$SESSION_CWD" ] && [ -d "$SESSION_CWD" ]; then
-  ROOT=$(git -C "$SESSION_CWD" rev-parse --show-toplevel 2>/dev/null)
-fi
-if [ -z "$ROOT" ] && [ -n "${CLAUDE_PROJECT_DIR:-}" ] && [ -d "$CLAUDE_PROJECT_DIR" ]; then
-  ROOT=$(git -C "$CLAUDE_PROJECT_DIR" rev-parse --show-toplevel 2>/dev/null) || ROOT="$CLAUDE_PROJECT_DIR"
-fi
-[ -z "$ROOT" ] && ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
-
-QDIR="$ROOT/.quetrex"
-# Only quetrex-managed repos are gated. No .quetrex/ -> not our concern, allow.
-{ [ -n "$ROOT" ] && [ -d "$QDIR" ]; } || exit 0
-
-# --- deny helper (correct PreToolUse schema; exit 0) -----------------------
-# With jq: the documented permissionDecision:"deny" object on exit 0.
-#
-# WITHOUT jq: deliberately NO JSON. A hand-rolled escaper is a fail-open in
-# disguise — the reasons this gate emits embed the tail of a failing build, a
-# security finding summary, or an ESCALATION note, all of which routinely carry
-# tabs, carriage returns and ANSI escapes. Those are raw control bytes, illegal
-# unescaped inside a JSON string (RFC 8259 requires U+0000–U+001F to be
-# escaped), so the payload is malformed, the runtime DROPS the undecodable
-# hook output, and "exit 0 + no decision" is read as ALLOW — the merge sails
-# through at exactly the moment the gate meant to stop it. So the fallback uses
-# the other blocking channel the hook contract provides instead: exit 2 is a
-# blocking error whose stderr is fed back to the agent. It blocks the tool call
-# outright and there is no JSON to malform.
-deny() {
-  local reason="$1"
-  if command -v jq >/dev/null 2>&1; then
-    jq -cn --arg r "$reason" \
-      '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"deny",permissionDecisionReason:$r}}'
-    exit 0
+  # --- resolve the repo THIS COMMAND TARGETS (worktree-safe) ------------------
+  #
+  # THE SECOND DEFECT THIS REPLACES: resolution used to start from
+  # CLAUDE_PROJECT_DIR — the SESSION's primary repo — so a command operating on
+  # another checkout was judged against the session repo's artifacts. Observed in
+  # the wild: branch cleanup in quetrex-plugins denied by quetrex-base's stale
+  # review verdict. One repo's REWORK must never block another repo's merge.
+  #
+  # Order is now most-specific-first: the directory named by the command itself,
+  # then the session cwd, and only then the project dir.
+  TARGET_DIR=""
+  if [[ "$VECTOR_SEG" =~ git[[:space:]]+-C[[:space:]]+([^[:space:]]+) ]]; then
+    TARGET_DIR=$(printf '%s' "${BASH_REMATCH[1]}" | sed 's/^["'\'']*//; s/["'\'']*$//')
+  elif [ -n "$PENDING_CD" ]; then
+    TARGET_DIR="$PENDING_CD"
   fi
-  printf '%s\n' "$reason" >&2
-  exit 2
-}
 
-# FAIL-CLOSED: a real quetrex merge with no jq cannot be evaluated -> deny.
-if ! command -v jq >/dev/null 2>&1; then
-  deny "MERGE GATE (ESCALATE_HUMAN): jq is not installed, so the merge gate cannot verify the review verdict, verify ledger, or security findings for '$merge_kind'. A merge must never proceed unevaluated. Install jq, then re-run the pipeline's review-gate."
-fi
+  ROOT=""
+  if [ -n "$TARGET_DIR" ] && [ -d "$TARGET_DIR" ]; then
+    ROOT=$(git -C "$TARGET_DIR" rev-parse --show-toplevel 2>/dev/null)
+  fi
+  if [ -z "$ROOT" ] && [ -n "$SESSION_CWD" ] && [ -d "$SESSION_CWD" ]; then
+    ROOT=$(git -C "$SESSION_CWD" rev-parse --show-toplevel 2>/dev/null)
+  fi
+  if [ -z "$ROOT" ] && [ -n "${CLAUDE_PROJECT_DIR:-}" ] && [ -d "$CLAUDE_PROJECT_DIR" ]; then
+    ROOT=$(git -C "$CLAUDE_PROJECT_DIR" rev-parse --show-toplevel 2>/dev/null) || ROOT="$CLAUDE_PROJECT_DIR"
+  fi
+  [ -z "$ROOT" ] && ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
 
-# --- gh pr merge argv: TOKENIZE and WALK it like gh's own flag parser ------
-#
-# THE DEFECT THIS REPLACES (five review rounds, five new spellings of the
-# same hole). Every previous version of this section matched a REGEX against
-# the whole command-segment STRING to find a --repo/-R flag. gh's flag
-# parser is pflag (Go), which is not regular: it understands separated
-# (`-R x`), attached (`-Rx`), `=`-joined (`-R=x`), and CLUSTERED short flags
-# (`-dRx` is --delete-branch + --repo, `-sdRx` is --squash + --delete-branch
-# + --repo), and for a repeated flag the LAST occurrence wins. A regex
-# anchored on a literal `-R` cannot represent "-R preceded by other short
-# flags packed into the same token," cannot represent "take the LAST match,
-# not the first" (bash's `=~` is leftmost-only), and — because it scans the
-# whole string rather than discrete tokens — cannot avoid matching "-R"
-# INSIDE the quoted VALUE of an unrelated flag (`-t 'chore: post-Review
-# cleanup'` regexed as if `-Review` were `--repo`). Every one of these was
-# found, independently, by adversarial review against the real `gh` binary.
-#
-# The fix is architectural, not another pattern: TOKENIZE the segment the way
-# a shell would (quote-aware, no `eval` — see tokenize_argv), then WALK the
-# tokens the way pflag does: left to right, tracking clusters, `=`,
-# attachment, and last-wins. FAIL CLOSED on anything that doesn't match a
-# KNOWN gh-pr-merge flag shape — an unrecognized flag, an unterminated
-# quote, or an ambiguous PR-identifier form denies the WHOLE merge rather
-# than guessing which value gh will actually use. A wrong guess here is not
-# a missed detection; it is authorizing a merge in a repo (or against a
-# commit) these artifacts say nothing about.
+  QDIR="$ROOT/.quetrex"
+  # Only quetrex-managed repos are gated. No .quetrex/ -> not our concern, allow.
+  { [ -n "$ROOT" ] && [ -d "$QDIR" ]; } || return 0
 
-# tokenize_argv <string> -- sets TOKENS[] (bash array) and
-# TOKENIZE_UNTERMINATED (1 if a quote was never closed). No eval: a
-# character-by-character state machine, so a $(...)/backtick inside the
-# inspected command string is read as inert text, never executed.
-tokenize_argv() {
-  # Split into two `local` statements deliberately: word expansion for an
-  # ENTIRE `local` command happens before the builtin runs, all in the
-  # enclosing scope's variable state — so `n=${#s}` on the SAME line as
-  # `s="$1"` would expand against whatever `s` was BEFORE this declaration
-  # (unset, under `set -u` an error) rather than the value just assigned.
-  local s="$1"
-  local i=0 n=${#s} c token='' in_sq=0 in_dq=0 have=0 nc
-  TOKENS=()
-  TOKENIZE_UNTERMINATED=0
-  while [ "$i" -lt "$n" ]; do
-    c="${s:$i:1}"
-    if [ "$in_sq" -eq 1 ]; then
-      if [ "$c" = "'" ]; then in_sq=0; else token+="$c"; fi
-    elif [ "$in_dq" -eq 1 ]; then
-      if [ "$c" = '"' ]; then in_dq=0
-      elif [ "$c" = '\' ] && [ $((i + 1)) -lt "$n" ]; then
-        nc="${s:$((i + 1)):1}"
-        case "$nc" in
-          '"' | '\' | '$' | '`') token+="$nc"; i=$((i + 1)) ;;
-          *) token+="$c" ;;
-        esac
+  # --- deny helper (correct PreToolUse schema; exit 0) -----------------------
+  # With jq: the documented permissionDecision:"deny" object on exit 0.
+  #
+  # WITHOUT jq: deliberately NO JSON. A hand-rolled escaper is a fail-open in
+  # disguise — the reasons this gate emits embed the tail of a failing build, a
+  # security finding summary, or an ESCALATION note, all of which routinely carry
+  # tabs, carriage returns and ANSI escapes. Those are raw control bytes, illegal
+  # unescaped inside a JSON string (RFC 8259 requires U+0000–U+001F to be
+  # escaped), so the payload is malformed, the runtime DROPS the undecodable
+  # hook output, and "exit 0 + no decision" is read as ALLOW — the merge sails
+  # through at exactly the moment the gate meant to stop it. So the fallback uses
+  # the other blocking channel the hook contract provides instead: exit 2 is a
+  # blocking error whose stderr is fed back to the agent. It blocks the tool call
+  # outright and there is no JSON to malform.
+  deny() {
+    local reason="$1"
+    if command -v jq >/dev/null 2>&1; then
+      jq -cn --arg r "$reason" \
+        '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"deny",permissionDecisionReason:$r}}'
+      exit 0
+    fi
+    printf '%s\n' "$reason" >&2
+    exit 2
+  }
+
+  # FAIL-CLOSED: a real quetrex merge with no jq cannot be evaluated -> deny.
+  if ! command -v jq >/dev/null 2>&1; then
+    deny "MERGE GATE (ESCALATE_HUMAN): jq is not installed, so the merge gate cannot verify the review verdict, verify ledger, or security findings for '$merge_kind'. A merge must never proceed unevaluated. Install jq, then re-run the pipeline's review-gate."
+  fi
+
+  # --- gh pr merge argv: TOKENIZE and WALK it like gh's own flag parser ------
+  #
+  # THE DEFECT THIS REPLACES (five review rounds, five new spellings of the
+  # same hole). Every previous version of this section matched a REGEX against
+  # the whole command-segment STRING to find a --repo/-R flag. gh's flag
+  # parser is pflag (Go), which is not regular: it understands separated
+  # (`-R x`), attached (`-Rx`), `=`-joined (`-R=x`), and CLUSTERED short flags
+  # (`-dRx` is --delete-branch + --repo, `-sdRx` is --squash + --delete-branch
+  # + --repo), and for a repeated flag the LAST occurrence wins. A regex
+  # anchored on a literal `-R` cannot represent "-R preceded by other short
+  # flags packed into the same token," cannot represent "take the LAST match,
+  # not the first" (bash's `=~` is leftmost-only), and — because it scans the
+  # whole string rather than discrete tokens — cannot avoid matching "-R"
+  # INSIDE the quoted VALUE of an unrelated flag (`-t 'chore: post-Review
+  # cleanup'` regexed as if `-Review` were `--repo`). Every one of these was
+  # found, independently, by adversarial review against the real `gh` binary.
+  #
+  # The fix is architectural, not another pattern: TOKENIZE the segment the way
+  # a shell would (quote-aware, no `eval` — see tokenize_argv), then WALK the
+  # tokens the way pflag does: left to right, tracking clusters, `=`,
+  # attachment, and last-wins. FAIL CLOSED on anything that doesn't match a
+  # KNOWN gh-pr-merge flag shape — an unrecognized flag, an unterminated
+  # quote, or an ambiguous PR-identifier form denies the WHOLE merge rather
+  # than guessing which value gh will actually use. A wrong guess here is not
+  # a missed detection; it is authorizing a merge in a repo (or against a
+  # commit) these artifacts say nothing about.
+
+  # tokenize_argv <string> -- sets TOKENS[] (bash array) and
+  # TOKENIZE_UNTERMINATED (1 if a quote was never closed). No eval: a
+  # character-by-character state machine, so a $(...)/backtick inside the
+  # inspected command string is read as inert text, never executed.
+  tokenize_argv() {
+    # Split into two `local` statements deliberately: word expansion for an
+    # ENTIRE `local` command happens before the builtin runs, all in the
+    # enclosing scope's variable state — so `n=${#s}` on the SAME line as
+    # `s="$1"` would expand against whatever `s` was BEFORE this declaration
+    # (unset, under `set -u` an error) rather than the value just assigned.
+    local s="$1"
+    local i=0 n=${#s} c token='' in_sq=0 in_dq=0 have=0 nc
+    TOKENS=()
+    TOKENIZE_UNTERMINATED=0
+    while [ "$i" -lt "$n" ]; do
+      c="${s:$i:1}"
+      if [ "$in_sq" -eq 1 ]; then
+        if [ "$c" = "'" ]; then in_sq=0; else token+="$c"; fi
+      elif [ "$in_dq" -eq 1 ]; then
+        if [ "$c" = '"' ]; then in_dq=0
+        elif [ "$c" = '\' ] && [ $((i + 1)) -lt "$n" ]; then
+          nc="${s:$((i + 1)):1}"
+          case "$nc" in
+            '"' | '\' | '$' | '`') token+="$nc"; i=$((i + 1)) ;;
+            *) token+="$c" ;;
+          esac
+        else
+          token+="$c"
+        fi
       else
-        token+="$c"
-      fi
-    else
-      case "$c" in
-        ' ' | $'\t')
-          [ "$have" -eq 1 ] && { TOKENS+=("$token"); token=''; have=0; }
-          ;;
-        "'") in_sq=1; have=1 ;;
-        '"') in_dq=1; have=1 ;;
-        '#')
-          # A `#` at the START of a word (not mid-token, outside quotes) is
-          # a shell comment — everything after it on this segment is inert.
-          # Without this, a trailing `# ... --repo evil/repo` comment reads
-          # as a real flag: the same over-match class as finding 3, just in
-          # the tokenizer instead of the segment splitter. `foo#bar` (no
-          # preceding space) is NOT a comment, matching real shell syntax.
-          if [ "$have" -eq 0 ]; then
-            break
-          fi
-          token+="$c"; have=1
-          ;;
-        '\')
-          if [ $((i + 1)) -lt "$n" ]; then
-            token+="${s:$((i + 1)):1}"
-            i=$((i + 1))
-            have=1
-          fi
-          ;;
-        *) token+="$c"; have=1 ;;
-      esac
-    fi
-    i=$((i + 1))
-  done
-  [ "$have" -eq 1 ] && TOKENS+=("$token")
-  { [ "$in_sq" -eq 1 ] || [ "$in_dq" -eq 1 ]; } && TOKENIZE_UNTERMINATED=1
-}
-
-# gh pr merge's flags, classified value/bool/unknown. `case`, not an
-# associative array: this file targets plain bash (macOS ships bash 3.2 as
-# /usr/bin/bash, no associative arrays), matching the style already used for
-# PR_VALUE_FLAGS elsewhere.
-gh_merge_short_kind() {  # -> prints value|bool|unknown
-  case "$1" in
-    A | b | F | t | R) printf 'value' ;;
-    d | m | r | s) printf 'bool' ;;
-    *) printf 'unknown' ;;
-  esac
-}
-gh_merge_long_kind() {  # -> prints value|bool|unknown
-  case "$1" in
-    author-email | body | body-file | subject | match-head-commit | repo) printf 'value' ;;
-    admin | auto | delete-branch | disable-auto | merge | rebase | squash | help) printf 'bool' ;;
-    *) printf 'unknown' ;;
-  esac
-}
-
-# looks_like_shell_expr <value> -- true if VALUE still looks like a shell
-# variable reference or command substitution ($SLUG, ${SLUG}, $(...), a
-# backtick expression) rather than a literal string. A real repo slug never
-# legitimately contains "$" or a backtick; seeing one means this text was
-# captured from the command's SOURCE before a shell would have expanded it
-# — which a PreToolUse hook, running before execution, always sees. See the
-# boundary note near the top of this file and the comment at this
-# function's call site for why that's handled as UNKNOWN, not fail-closed.
-looks_like_shell_expr() {
-  case "$1" in
-    *'$'* | *'`'*) return 0 ;;
-    *) return 1 ;;
-  esac
-}
-
-# parse_gh_pr_merge <segment> -- tokenizes and walks a `gh pr merge ...`
-# segment the way pflag would. Sets:
-#   PARSE_OK        1 if every token was classified with confidence
-#   PARSED_PR_ID    the PR identifier (number/URL/branch), or empty
-#   PARSED_REPO     the repo the LAST -R/--repo occurrence named (repeated
-#                   flags: last wins, matching real gh), or empty
-parse_gh_pr_merge() {
-  local seg="$1" i n tok kind name val rest letter after_dd=0
-  PARSE_OK=1
-  PARSED_PR_ID=""
-  PARSED_REPO=""
-
-  tokenize_argv "$seg"
-  if [ "$TOKENIZE_UNTERMINATED" -eq 1 ]; then
-    PARSE_OK=0
-    return
-  fi
-
-  n=${#TOKENS[@]}
-  # First 3 tokens are the already-matched "gh pr merge" prefix.
-  if [ "$n" -lt 3 ]; then PARSE_OK=0; return; fi
-  i=3
-  while [ "$i" -lt "$n" ]; do
-    tok="${TOKENS[$i]}"
-    if [ "$after_dd" -eq 1 ]; then
-      [ -z "$PARSED_PR_ID" ] && PARSED_PR_ID="$tok"
-      i=$((i + 1)); continue
-    fi
-    case "$tok" in
-      --)
-        after_dd=1 ;;
-      --*)
-        name="${tok#--}"
-        val=""
-        case "$name" in
-          *=*) val="${name#*=}"; name="${name%%=*}" ;;
-        esac
-        kind=$(gh_merge_long_kind "$name")
-        case "$kind" in
-          unknown) PARSE_OK=0; return ;;
-          bool)
-            [ -n "$val" ] && { PARSE_OK=0; return; }
+        case "$c" in
+          ' ' | $'\t')
+            [ "$have" -eq 1 ] && { TOKENS+=("$token"); token=''; have=0; }
             ;;
-          value)
-            if [ -z "$val" ] && [[ "$tok" != *=* ]]; then
-              i=$((i + 1))
-              [ "$i" -ge "$n" ] && { PARSE_OK=0; return; }
-              val="${TOKENS[$i]}"
+          "'") in_sq=1; have=1 ;;
+          '"') in_dq=1; have=1 ;;
+          '#')
+            # A `#` at the START of a word (not mid-token, outside quotes) is
+            # a shell comment — everything after it on this segment is inert.
+            # Without this, a trailing `# ... --repo evil/repo` comment reads
+            # as a real flag: the same over-match class as finding 3, just in
+            # the tokenizer instead of the segment splitter. `foo#bar` (no
+            # preceding space) is NOT a comment, matching real shell syntax.
+            if [ "$have" -eq 0 ]; then
+              break
             fi
-            [ "$name" = "repo" ] && PARSED_REPO="$val"
+            token+="$c"; have=1
             ;;
+          '\')
+            if [ $((i + 1)) -lt "$n" ]; then
+              token+="${s:$((i + 1)):1}"
+              i=$((i + 1))
+              have=1
+            fi
+            ;;
+          *) token+="$c"; have=1 ;;
         esac
-        ;;
-      -?*)
-        rest="${tok#-}"
-        while [ -n "$rest" ]; do
-          letter="${rest:0:1}"
-          rest="${rest:1}"
-          kind=$(gh_merge_short_kind "$letter")
+      fi
+      i=$((i + 1))
+    done
+    [ "$have" -eq 1 ] && TOKENS+=("$token")
+    { [ "$in_sq" -eq 1 ] || [ "$in_dq" -eq 1 ]; } && TOKENIZE_UNTERMINATED=1
+  }
+
+  # gh pr merge's flags, classified value/bool/unknown. `case`, not an
+  # associative array: this file targets plain bash (macOS ships bash 3.2 as
+  # /usr/bin/bash, no associative arrays), matching the style already used for
+  # PR_VALUE_FLAGS elsewhere.
+  gh_merge_short_kind() {  # -> prints value|bool|unknown
+    case "$1" in
+      A | b | F | t | R) printf 'value' ;;
+      d | m | r | s) printf 'bool' ;;
+      *) printf 'unknown' ;;
+    esac
+  }
+  gh_merge_long_kind() {  # -> prints value|bool|unknown
+    case "$1" in
+      author-email | body | body-file | subject | match-head-commit | repo) printf 'value' ;;
+      admin | auto | delete-branch | disable-auto | merge | rebase | squash | help) printf 'bool' ;;
+      *) printf 'unknown' ;;
+    esac
+  }
+
+  # looks_like_shell_expr <value> -- true if VALUE still looks like a shell
+  # variable reference or command substitution ($SLUG, ${SLUG}, $(...), a
+  # backtick expression) rather than a literal string. A real repo slug never
+  # legitimately contains "$" or a backtick; seeing one means this text was
+  # captured from the command's SOURCE before a shell would have expanded it
+  # — which a PreToolUse hook, running before execution, always sees. See the
+  # boundary note near the top of this file and the comment at this
+  # function's call site for why that's handled as UNKNOWN, not fail-closed.
+  looks_like_shell_expr() {
+    case "$1" in
+      *'$'* | *'`'*) return 0 ;;
+      *) return 1 ;;
+    esac
+  }
+
+  # repo_expr_literal_prefix <value> -- prints the literal text before the
+  # FIRST "$" or backtick in VALUE -- the part no shell expansion can ever
+  # change, regardless of what the variable/substitution after it resolves
+  # to. Empty when the expression starts at position 0 (e.g. plain "$SLUG"
+  # has no literal prefix at all).
+  repo_expr_literal_prefix() {
+    local v="$1" p1 p2
+    p1="${v%%\$*}"
+    p2="${v%%\`*}"
+    if [ "${#p1}" -le "${#p2}" ]; then printf '%s' "$p1"; else printf '%s' "$p2"; fi
+  }
+
+  # deny_if_literal_prefix_contradicts <raw_value> <source_label> -- called
+  # only for a value looks_like_shell_expr already flagged as unresolvable
+  # (fail-open: dropped as a signal, not compared -- see the boundary note
+  # and the call site below for the full reasoning, including why this is
+  # NOT a fail-closed reversal of that decision). Its KNOWN literal prefix
+  # is still checked: if ORIGIN_SLUG does not even START WITH that prefix,
+  # NO possible expansion of the unresolved remainder could make the
+  # finished value equal ORIGIN_SLUG -- that is proof of a mismatch, not an
+  # unknown. An unexpandable SUFFIX must not rescue a wrong PREFIX.
+  deny_if_literal_prefix_contradicts() {
+    local raw="$1" label="$2" prefix lc_prefix
+    [ -z "${ORIGIN_SLUG:-}" ] && return 0
+    prefix=$(repo_expr_literal_prefix "$raw")
+    [ -z "$prefix" ] && return 0
+    lc_prefix=$(printf '%s' "$prefix" | tr 'A-Z' 'a-z')
+    if [ "${ORIGIN_SLUG#"$lc_prefix"}" = "$ORIGIN_SLUG" ]; then
+      deny "MERGE GATE (ESCALATE_HUMAN): the $label value '$raw' is not fully resolvable (it contains an unexpanded shell expression), but its known literal prefix '$prefix' already does not match this checkout's origin '$ORIGIN_SLUG' -- no possible expansion of the rest could make it match. This gate will not guess that the expression conveniently resolves to this repo when its own fixed text already says otherwise."
+    fi
+  }
+
+  # parse_gh_pr_merge <segment> -- tokenizes and walks a `gh pr merge ...`
+  # segment the way pflag would. Sets:
+  #   PARSE_OK        1 if every token was classified with confidence
+  #   PARSED_PR_ID    the PR identifier (number/URL/branch), or empty
+  #   PARSED_REPO     the repo the LAST -R/--repo occurrence named (repeated
+  #                   flags: last wins, matching real gh), or empty
+  parse_gh_pr_merge() {
+    local seg="$1" i n tok kind name val rest letter after_dd=0
+    PARSE_OK=1
+    PARSED_PR_ID=""
+    PARSED_REPO=""
+
+    tokenize_argv "$seg"
+    if [ "$TOKENIZE_UNTERMINATED" -eq 1 ]; then
+      PARSE_OK=0
+      return
+    fi
+
+    n=${#TOKENS[@]}
+    # First 3 tokens are the already-matched "gh pr merge" prefix.
+    if [ "$n" -lt 3 ]; then PARSE_OK=0; return; fi
+    i=3
+    while [ "$i" -lt "$n" ]; do
+      tok="${TOKENS[$i]}"
+      if [ "$after_dd" -eq 1 ]; then
+        [ -z "$PARSED_PR_ID" ] && PARSED_PR_ID="$tok"
+        i=$((i + 1)); continue
+      fi
+      case "$tok" in
+        --)
+          after_dd=1 ;;
+        --*)
+          name="${tok#--}"
+          val=""
+          case "$name" in
+            *=*) val="${name#*=}"; name="${name%%=*}" ;;
+          esac
+          kind=$(gh_merge_long_kind "$name")
           case "$kind" in
             unknown) PARSE_OK=0; return ;;
-            bool) : ;;
+            bool)
+              [ -n "$val" ] && { PARSE_OK=0; return; }
+              ;;
             value)
-              val="${rest#=}"
-              if [ -z "$val" ]; then
+              if [ -z "$val" ] && [[ "$tok" != *=* ]]; then
                 i=$((i + 1))
                 [ "$i" -ge "$n" ] && { PARSE_OK=0; return; }
                 val="${TOKENS[$i]}"
               fi
-              [ "$letter" = "R" ] && PARSED_REPO="$val"
-              rest=""
+              [ "$name" = "repo" ] && PARSED_REPO="$val"
               ;;
           esac
-        done
+          ;;
+        -?*)
+          rest="${tok#-}"
+          while [ -n "$rest" ]; do
+            letter="${rest:0:1}"
+            rest="${rest:1}"
+            kind=$(gh_merge_short_kind "$letter")
+            case "$kind" in
+              unknown) PARSE_OK=0; return ;;
+              bool) : ;;
+              value)
+                val="${rest#=}"
+                if [ -z "$val" ]; then
+                  i=$((i + 1))
+                  [ "$i" -ge "$n" ] && { PARSE_OK=0; return; }
+                  val="${TOKENS[$i]}"
+                fi
+                [ "$letter" = "R" ] && PARSED_REPO="$val"
+                rest=""
+                ;;
+            esac
+          done
+          ;;
+        *)
+          [ -z "$PARSED_PR_ID" ] && PARSED_PR_ID="$tok"
+          ;;
+      esac
+      i=$((i + 1))
+    done
+  }
+
+  # --- resolve the PR identifier and any repo selector, ONCE ------------------
+  # Both the cross-repo refusal below and the later PR-head/base resolution
+  # reuse PARSED_PR_ID / EFFECTIVE_REPO — a single parse, not two independent
+  # passes that could (and, historically, did) disagree.
+  PARSED_PR_ID=""
+  EFFECTIVE_REPO=""
+  if [ "$merge_kind" = "gh pr merge" ]; then
+    parse_gh_pr_merge "$VECTOR_SEG"
+    if [ "$PARSE_OK" -ne 1 ]; then
+      deny "MERGE GATE (ESCALATE_HUMAN): could not confidently parse this 'gh pr merge' invocation — an unrecognized flag, an unterminated quote, or an unrecognized PR-identifier URL. A merge must never be evaluated by guessing what its arguments mean. Simplify the command, or run it after confirming the target repo and commit by hand."
+    fi
+
+    # A PR URL names a repo too — gh resolves the PR (and the repo) straight
+    # from it. A token containing "://" that ISN'T a recognized github.com PR
+    # URL is not silently treated as a harmless branch name — same fail-closed
+    # rule as an unknown flag.
+    URL_REPO=""
+    case "$PARSED_PR_ID" in
+      https://github.com/*/*/pull/*)
+        if [[ "$PARSED_PR_ID" =~ ^https://github\.com/([^/]+/[^/]+)/pull/[0-9]+/?$ ]]; then
+          URL_REPO=$(printf '%s' "${BASH_REMATCH[1]}" | tr 'A-Z' 'a-z')
+        else
+          deny "MERGE GATE (ESCALATE_HUMAN): the PR identifier '$PARSED_PR_ID' looks like a GitHub PR URL but doesn't match the recognized github.com owner/repo/pull/number shape. A merge must never be evaluated by guessing which repository a malformed URL names."
+        fi
         ;;
-      *)
-        [ -z "$PARSED_PR_ID" ] && PARSED_PR_ID="$tok"
+      *://*)
+        deny "MERGE GATE (ESCALATE_HUMAN): the PR identifier '$PARSED_PR_ID' looks like a URL this gate doesn't recognize as a GitHub PR URL. A merge must never be evaluated by guessing which repository it names."
         ;;
     esac
-    i=$((i + 1))
-  done
-}
 
-# --- resolve the PR identifier and any repo selector, ONCE ------------------
-# Both the cross-repo refusal below and the later PR-head/base resolution
-# reuse PARSED_PR_ID / EFFECTIVE_REPO — a single parse, not two independent
-# passes that could (and, historically, did) disagree.
-PARSED_PR_ID=""
-EFFECTIVE_REPO=""
-if [ "$merge_kind" = "gh pr merge" ]; then
-  parse_gh_pr_merge "$VECTOR_SEG"
-  if [ "$PARSE_OK" -ne 1 ]; then
-    deny "MERGE GATE (ESCALATE_HUMAN): could not confidently parse this 'gh pr merge' invocation — an unrecognized flag, an unterminated quote, or an unrecognized PR-identifier URL. A merge must never be evaluated by guessing what its arguments mean. Simplify the command, or run it after confirming the target repo and commit by hand."
+    # gh ALSO reads GH_REPO from the environment when no --repo/-R flag is on
+    # the command line — this hook's OWN process environment is the same one
+    # the real `gh pr merge` will run in, so an exported GH_REPO here is a
+    # genuine signal, not noise. This is exactly why the flag-parsed value
+    # above lives in PARSED_REPO, never in a variable literally named
+    # GH_REPO: reusing gh's own environment-variable name for internal state
+    # made an ambiently-exported GH_REPO indistinguishable from "the command
+    # itself set --repo" — the classic collision. If this fires on a
+    # same-repo merge unexpectedly, `unset GH_REPO` in the shell and retry.
+    ENV_REPO=$(printf '%s' "${GH_REPO:-}" | tr 'A-Z' 'a-z')
+
+    # An inline/env-wrapped `GH_REPO=` assignment ON THIS SAME SEGMENT
+    # (`GH_REPO=x gh pr merge`, `env GH_REPO=x gh pr merge`) is a signal too
+    # — captured by normalize_segment above into VECTOR_GH_REPO_PREFIX rather
+    # than silently discarded along with the rest of the prefix. An `export
+    # GH_REPO=x;` on an EARLIER, separate segment of the same line is NOT
+    # covered here — see the boundary note near the top of this file for why.
+    PREFIX_REPO_RAW=$(printf '%s' "$VECTOR_GH_REPO_PREFIX" | sed 's/^["'\'']*//; s/["'\'']*$//')
+    FLAG_REPO_RAW=$(printf '%s' "$PARSED_REPO" | sed 's/^["'\'']*//; s/["'\'']*$//')
+
+    # Resolved once, here, rather than only inside the sha-compare branch
+    # below — deny_if_literal_prefix_contradicts (next) needs it too, and
+    # computing it just once for both uses is both cheaper and the only way
+    # the two checks can agree on what "this repo" means.
+    ORIGIN_SLUG=$(git -C "$ROOT" remote get-url origin 2>/dev/null \
+      | sed -e 's#\.git$##' -e 's#.*[:/]\([^/][^/]*/[^/][^/]*\)$#\1#' | tr 'A-Z' 'a-z')
+
+    # An unexpanded shell variable/command-substitution in the repo VALUE
+    # position ($SLUG, ${SLUG}, $(...), `...`) is treated as UNKNOWN — not as
+    # a literal repo name to compare — and dropped from the signal set (fail
+    # OPEN, for this signal only). This hook parses TEXT; it does not execute
+    # a shell and cannot know what $SLUG will resolve to. FAIL-CLOSED here was
+    # considered and rejected: this exact shape is what this engine's OWN
+    # `/quetrex:merge` command emits (`gh pr merge "$PR_NUM" --repo "$SLUG"
+    # ...`, with SLUG computed from the local repo's own origin earlier in
+    # the same script) — denying on an unresolvable expression would deny
+    # that command for the SAME reason every time, breaking the pipeline's
+    # own merge step outright. The residual risk is bounded: a value set via
+    # a mechanism this hook DOES track (an inherited/inline GH_REPO, above)
+    # is still caught by THAT signal independently of what this flag's own
+    # value says; a value set via a mechanism this hook does not track at
+    # all (a shell function, a sourced file) is already out of bounds
+    # regardless — see the boundary note — and fail-closed here would not
+    # close that gap, only break the common, legitimate case.
+    #
+    # STILL DENIES on a value whose KNOWN LITERAL PREFIX already contradicts
+    # this repo's origin (`--repo "other-org/$VAR"`, `--repo "other-org/
+    # other-repo${EMPTY}"`) — see deny_if_literal_prefix_contradicts. Fail
+    # OPEN means "unknown", not "assume it happens to resolve to this repo";
+    # when the fixed, un-expandable part of the value already proves it
+    # cannot, that is no longer an unknown.
+    if looks_like_shell_expr "$FLAG_REPO_RAW"; then
+      FLAG_REPO=""
+      deny_if_literal_prefix_contradicts "$FLAG_REPO_RAW" "-R/--repo"
+    else
+      FLAG_REPO=$(printf '%s' "$FLAG_REPO_RAW" | tr 'A-Z' 'a-z')
+    fi
+    if looks_like_shell_expr "$PREFIX_REPO_RAW"; then
+      PREFIX_REPO=""
+      deny_if_literal_prefix_contradicts "$PREFIX_REPO_RAW" "GH_REPO= prefix-assignment"
+    else
+      PREFIX_REPO=$(printf '%s' "$PREFIX_REPO_RAW" | tr 'A-Z' 'a-z')
+    fi
+
+    # Collect DISTINCT non-empty repo signals. More than one, disagreeing, is
+    # ambiguous — refuse to guess which one gh will actually honor rather
+    # than picking one and being wrong.
+    SIGNAL_SET=""
+    for sig in "$FLAG_REPO" "$PREFIX_REPO" "$URL_REPO" "$ENV_REPO"; do
+      [ -z "$sig" ] && continue
+      case " $SIGNAL_SET " in
+        *" $sig "*) : ;;
+        *) SIGNAL_SET="$SIGNAL_SET $sig" ;;
+      esac
+    done
+    SIGNAL_SET=$(printf '%s' "$SIGNAL_SET" | sed 's/^ *//; s/ *$//')
+    SIGNAL_COUNT=0
+    [ -n "$SIGNAL_SET" ] && SIGNAL_COUNT=$(printf '%s\n' "$SIGNAL_SET" | wc -w | tr -d ' ')
+
+    if [ "$SIGNAL_COUNT" -gt 1 ]; then
+      deny "MERGE GATE (ESCALATE_HUMAN): this command's repository selectors disagree — flag/prefix-assignment/PR-URL/environment GH_REPO name different repos ($SIGNAL_SET). This gate will not guess which one 'gh' will actually honor; a wrong guess here means authorizing a merge in a repo these artifacts say nothing about."
+    elif [ "$SIGNAL_COUNT" -eq 1 ]; then
+      EFFECTIVE_REPO="$SIGNAL_SET"
+      if [ -n "$ORIGIN_SLUG" ] && [ "$EFFECTIVE_REPO" != "$ORIGIN_SLUG" ]; then
+        deny "MERGE GATE (ESCALATE_HUMAN): this command merges a PR in '$EFFECTIVE_REPO', but it is running against a checkout of '$ORIGIN_SLUG'. The gate artifacts here (review verdict, verify ledger, security findings) describe '$ORIGIN_SLUG' and say NOTHING about '$EFFECTIVE_REPO', so it cannot evaluate this merge — and it will not judge one repo by another repo's verdict. Run the merge from inside a checkout of '$EFFECTIVE_REPO' so that repo's own gates apply."
+      fi
+    fi
   fi
 
-  # A PR URL names a repo too — gh resolves the PR (and the repo) straight
-  # from it. A token containing "://" that ISN'T a recognized github.com PR
-  # URL is not silently treated as a harmless branch name — same fail-closed
-  # rule as an unknown flag.
-  URL_REPO=""
-  case "$PARSED_PR_ID" in
-    https://github.com/*/*/pull/*)
-      if [[ "$PARSED_PR_ID" =~ ^https://github\.com/([^/]+/[^/]+)/pull/[0-9]+/?$ ]]; then
-        URL_REPO=$(printf '%s' "${BASH_REMATCH[1]}" | tr 'A-Z' 'a-z')
+  LEDGER="$QDIR/verify-ledger.jsonl"
+  RV="$QDIR/review-verdict.json"
+  SEC="$QDIR/security-findings.json"
+  ESCALATION="$QDIR/ESCALATION"
+
+  HEAD_SHA=$(git -C "$ROOT" rev-parse HEAD 2>/dev/null)
+
+  # --- gh pr merge: pin every gate to the PR's HEAD COMMIT, not local HEAD ----
+  #
+  # THE BUG THIS FIXES (reproduced live 2026-08-07). Every gate below compares
+  # its artifact's recorded sha against $HEAD_SHA under the assumption that
+  # $HEAD_SHA IS the commit being merged. That holds for `push to main` and
+  # `merge into main` — the local checkout literally becomes that commit. It is
+  # FALSE for `gh pr merge`: the commit actually being merged is the PR's head
+  # commit, but the local checkout is almost always sitting on main (wherever
+  # `cd`/`git -C` last left it). A review verdict correctly pinned to the PR's
+  # real head (11f84d2) was denied as "stale" solely because it was compared
+  # against local main's tip (b7bf116) — nothing was actually stale, and the
+  # operator's only escape was to check out the PR head by hand.
+  #
+  # Resolve the PR's real head commit from the PR itself and, for this vector
+  # ONLY, use it as $HEAD_SHA for every gate below — including the diff-content
+  # gates (the sensitive-surface preamble and GATE 5's ownership check), which
+  # is why the fetch below exists: reading $CHANGED/$ADDED off $ROOT's local
+  # `HEAD` was the SAME defect wearing a second hat. A sensitive PR merged with
+  # no security review, and a clean PR was denied for touching a file it never
+  # touched, because both gates were silently diffing local main's last commit
+  # instead of the PR. Non-PR vectors (push to main, merge into main) are
+  # untouched — local HEAD keeps governing them exactly as before, because for
+  # THEM local HEAD genuinely is the commit being shipped.
+  #
+  # The BASE end of that diff matters just as much as the head end, and gets
+  # the SAME treatment: also resolved from the PR (its baseRefOid — the base
+  # branch's CURRENT tip on GitHub), not from $ROOT's local `main`/`master`
+  # ref. A checkout that is behind origin is the routine case, not an edge
+  # case — the cloud cuts the PR branch off current main while the laptop
+  # hasn't pulled — and diffing against a stale local base OVER-reports: files
+  # another team already merged to main show up as "changed by this PR" and
+  # get denied as unowned, or scanned for sensitivity, when they were never
+  # part of it.
+  #
+  # FAIL CLOSED: if either ref cannot be resolved or fetched (gh missing, PR
+  # not found, not authenticated, network hiccup), DENY. A merge that cannot
+  # be evaluated against its real content is never let through unevaluated.
+  if [ "$merge_kind" = "gh pr merge" ]; then
+    # PARSED_PR_ID and EFFECTIVE_REPO were already resolved above — the SAME
+    # parse pass that decided the cross-repo refusal — and are reused here
+    # rather than re-parsing $VECTOR_SEG a second time with separate logic.
+    # Two independent regex passes over the same string disagreeing about
+    # which repo/PR-id a command named is exactly the shape of bug this
+    # unification closes.
+
+    # One call, both refs — headRefOid AND baseRefOid — parsed locally with jq
+    # rather than gh's own --jq, so a single captured payload answers both.
+    if [ -n "$EFFECTIVE_REPO" ]; then
+      if [ -n "$PARSED_PR_ID" ]; then
+        PR_VIEW_JSON=$(cd "$ROOT" 2>/dev/null && gh pr view "$PARSED_PR_ID" --repo "$EFFECTIVE_REPO" --json headRefOid,baseRefOid 2>/dev/null)
       else
-        deny "MERGE GATE (ESCALATE_HUMAN): the PR identifier '$PARSED_PR_ID' looks like a GitHub PR URL but doesn't match the recognized github.com owner/repo/pull/number shape. A merge must never be evaluated by guessing which repository a malformed URL names."
+        PR_VIEW_JSON=$(cd "$ROOT" 2>/dev/null && gh pr view --repo "$EFFECTIVE_REPO" --json headRefOid,baseRefOid 2>/dev/null)
       fi
+    else
+      if [ -n "$PARSED_PR_ID" ]; then
+        PR_VIEW_JSON=$(cd "$ROOT" 2>/dev/null && gh pr view "$PARSED_PR_ID" --json headRefOid,baseRefOid 2>/dev/null)
+      else
+        PR_VIEW_JSON=$(cd "$ROOT" 2>/dev/null && gh pr view --json headRefOid,baseRefOid 2>/dev/null)
+      fi
+    fi
+    PR_HEAD_SHA=$(printf '%s' "${PR_VIEW_JSON:-}" | jq -r '.headRefOid // empty' 2>/dev/null)
+    PR_BASE_SHA=$(printf '%s' "${PR_VIEW_JSON:-}" | jq -r '.baseRefOid // empty' 2>/dev/null)
+
+    if [ -z "$PR_HEAD_SHA" ] || ! [[ "$PR_HEAD_SHA" =~ ^[0-9a-f]{7,40}$ ]]; then
+      deny "MERGE GATE (ESCALATE_HUMAN): could not resolve the PR's head commit (\`gh pr view${PARSED_PR_ID:+ $PARSED_PR_ID}${EFFECTIVE_REPO:+ --repo $EFFECTIVE_REPO} --json headRefOid,baseRefOid\` failed or returned nothing usable). A merge must never be evaluated against the wrong commit, or left unevaluated — check that 'gh' is installed and authenticated and that the PR exists, then retry."
+    fi
+    if [ -z "$PR_BASE_SHA" ] || ! [[ "$PR_BASE_SHA" =~ ^[0-9a-f]{7,40}$ ]]; then
+      deny "MERGE GATE (ESCALATE_HUMAN): resolved the PR's head commit but not its base (\`gh pr view${PARSED_PR_ID:+ $PARSED_PR_ID}${EFFECTIVE_REPO:+ --repo $EFFECTIVE_REPO} --json headRefOid,baseRefOid\` returned no usable baseRefOid). Without the PR's real base, the diff-based gates cannot tell what THIS PR changed versus what was already on main — do not guess by falling back to local HEAD."
+    fi
+    HEAD_SHA="$PR_HEAD_SHA"
+    DIFF_BASE="$PR_BASE_SHA"
+
+    # The diff-content gates below need the ACTUAL commit objects for both ends
+    # of the range, not just their sha strings. The primary checkout may never
+    # have fetched the PR branch (pushed from a worktree, or built entirely in
+    # the cloud) — or may simply be BEHIND origin/main, which is the routine
+    # case, not an edge case. Either way, `git diff` against a missing object
+    # silently reads as "no changes", and diffing against a stale local base
+    # over-reports files someone else already merged. Fetch whatever is
+    # missing. FAIL CLOSED: an uninspectable diff must never be treated as
+    # clean, or its ownership as violated, by omission — deny rather than
+    # evaluate blind.
+    #
+    # The existence check runs BOTH before AND after the fetch: `git fetch`
+    # exiting 0 is not, by itself, proof the object is now present (a wrapper,
+    # a partial fetch, or an oddly-configured remote could exit clean without
+    # it) — cat-file is what's actually trusted, both times.
+    ensure_commit_fetched() {  # ensure_commit_fetched <sha> <label> -> denies on failure
+      local sha="$1" label="$2"
+      git -C "$ROOT" cat-file -e "${sha}^{commit}" 2>/dev/null && return 0
+      if ! git -C "$ROOT" fetch --no-tags -q origin "$sha" 2>/dev/null; then
+        deny "MERGE GATE (ESCALATE_HUMAN): resolved the PR's $label commit (${sha:0:12}) but could not fetch it into this checkout ('git fetch origin ${sha:0:12}' failed) — the diff-based gates (sensitive-surface detection, file-ownership) cannot inspect what is actually being merged without it, and evaluating them against local HEAD instead would silently describe the wrong commit. Fetch the PR branch into this checkout (e.g. 'git fetch origin pull/<n>/head') and retry."
+      fi
+      if ! git -C "$ROOT" cat-file -e "${sha}^{commit}" 2>/dev/null; then
+        deny "MERGE GATE (ESCALATE_HUMAN): 'git fetch origin ${sha:0:12}' exited 0 but the $label commit (${sha:0:12}) still is not present in this checkout — refusing to trust the fetch's exit code alone. Fetch the PR branch into this checkout manually and retry."
+      fi
+    }
+    ensure_commit_fetched "$PR_HEAD_SHA" "head"
+    ensure_commit_fetched "$PR_BASE_SHA" "base"
+  fi
+
+  # ===========================================================================
+  # PREAMBLE — is a security review REQUIRED for this diff, and what does the
+  #            independent security artifact say?
+  # ===========================================================================
+  # Computed HERE, before GATE 2b, because 2b now needs both answers (it used to
+  # demand a field the reviewer structurally cannot fill — see GATE 2b). Pure
+  # reads, no side effects; GATE 4 and GATE 5 reuse the same values below.
+  #
+  # A security review is REQUIRED when EITHER of these holds:
+  #   (a) the plan set security_review_required:true (router/architect forced it), OR
+  #   (b) the ACTUAL diff being merged touches a sensitive surface — auth/authz,
+  #       input handling, secrets/crypto, external calls, data-access, or a DB
+  #       migration — regardless of what the plan says.
+  # (b) is the floor that makes security non-bypassable: a plan that simply omits
+  # the flag (defaulting it false) cannot ship sensitive code unreviewed, because
+  # the gate inspects the diff itself, not the agent's classification of it.
+  PLAN=""
+  TASK=$(jq -r '.task // empty' "$QDIR/state.json" 2>/dev/null)
+  if [ -n "$TASK" ] && [ -f "$QDIR/plan/$TASK.json" ]; then
+    PLAN="$QDIR/plan/$TASK.json"
+  else
+    # Fall back to any single plan file if state.json is unavailable.
+    PLAN=$(ls -1 "$QDIR"/plan/*.json 2>/dev/null | head -n1)
+  fi
+  PLAN_SEC="false"
+  [ -n "$PLAN" ] && PLAN_SEC=$(jq -r '.security_review_required // false' "$PLAN" 2>/dev/null)
+
+  # --- (b) inspect the real diff for a sensitive surface ---------------------
+  # Diff the commit actually being merged ($HEAD_SHA — the PR's head for a
+  # `gh pr merge`, local HEAD for everything else; see above) against its real
+  # base ($DIFF_BASE — the PR's own baseRefOid for a `gh pr merge`, resolved
+  # above; local main/master for everything else). Three-dot range = what
+  # $HEAD_SHA changed since it diverged from $DIFF_BASE. Deliberately NOT the
+  # literal refs `HEAD`/`main`: for a `gh pr merge`, the local checkout is not
+  # on the head commit, and local `main` can be BEHIND the PR's actual base —
+  # diffing against a stale local base over-reports files someone else already
+  # merged as "changed by this PR" (see the resolution block above).
+  if [ -z "${DIFF_BASE:-}" ]; then
+    DIFF_BASE="main"
+    if ! git -C "$ROOT" rev-parse --verify --quiet main >/dev/null 2>&1; then
+      git -C "$ROOT" rev-parse --verify --quiet master >/dev/null 2>&1 && DIFF_BASE="master"
+    fi
+  fi
+  SENSITIVE_DIFF=0
+  CHANGED=$(git -C "$ROOT" diff --name-only "$DIFF_BASE"..."$HEAD_SHA" 2>/dev/null)
+  # Fall back to the last commit's files if the base range can't be computed.
+  [ -z "$CHANGED" ] && CHANGED=$(git -C "$ROOT" diff --name-only "$HEAD_SHA"~1.."$HEAD_SHA" 2>/dev/null)
+  SENSITIVE_PATH_RE='(auth|authz|authn|login|logout|signin|sign-in|session|oauth|openid|saml|sso|jwt|token|secret|credential|password|passwd|crypto|encrypt|decrypt|cipher|migration|migrate|schema|\.sql$|payment|billing|invoice|checkout|charge|stripe|paypal|permission|role|rbac|tenant|acl|middleware|guard|policy|webhook|\.github/workflows/|dockerfile|docker-compose|terraform|pulumi|kubernetes|k8s|helm)'
+  if [ -n "$CHANGED" ] && printf '%s\n' "$CHANGED" | grep -qiE "$SENSITIVE_PATH_RE"; then
+    SENSITIVE_DIFF=1
+  fi
+  # Also scan ADDED lines for sensitive code patterns even when the path is neutral
+  # (data-access by client id, whole-body binding, injection sinks, env/secret use,
+  # external calls). Only added (+) lines to avoid flagging deletions.
+  if [ "$SENSITIVE_DIFF" -eq 0 ]; then
+    ADDED=$(git -C "$ROOT" diff "$DIFF_BASE"..."$HEAD_SHA" 2>/dev/null | grep -E '^\+' | grep -vE '^\+\+\+')
+    [ -z "$ADDED" ] && ADDED=$(git -C "$ROOT" diff "$HEAD_SHA"~1.."$HEAD_SHA" 2>/dev/null | grep -E '^\+' | grep -vE '^\+\+\+')
+    SENSITIVE_CODE_RE='(findById|find_by_id|findOne|req\.(params|query|body)|request\.(args|form|json|params)|Object\.assign|dangerouslySetInnerHTML|innerHTML|v-html|child_process|execSync|spawnSync|[^a-zA-Z]eval\(|process\.env|os\.environ|getenv|jwt\.|bcrypt|scrypt|argon2|createHash|createCipher|\.raw\(|\$where|authorize\(|authenticate|passport|fetch\(|axios|http\.request|urllib|requests\.(get|post))'
+    if [ -n "$ADDED" ] && printf '%s' "$ADDED" | grep -qE "$SENSITIVE_CODE_RE"; then
+      SENSITIVE_DIFF=1
+    fi
+  fi
+
+  NEED_SEC="false"; SEC_WHY=""
+  if [ "$PLAN_SEC" = "true" ]; then
+    NEED_SEC="true"; SEC_WHY="the plan set security_review_required:true"
+  elif [ "$SENSITIVE_DIFF" -eq 1 ]; then
+    NEED_SEC="true"; SEC_WHY="the diff touches a sensitive surface (auth/authz/input/secrets/crypto/external-call/data-access/migration)"
+  fi
+
+  # sec_artifact_state — what the INDEPENDENT security-reviewer artifact proves
+  # about the exact commit being merged. Echoes exactly one of:
+  #   missing | malformed | unpinned | stale | critical | clean
+  # Stricter than GATE 4 on one point: a head_sha is MANDATORY here, because in
+  # GATE 2b this artifact is load-bearing as proof of an independent pass, and an
+  # unpinned finding set proves nothing about this commit.
+  sec_artifact_state() {
+    [ -f "$SEC" ] || { printf 'missing'; return; }
+    local findings sha crit
+    findings=$(jq -c 'if type == "object" then (.findings // []) else . end' "$SEC" 2>/dev/null)
+    if [ -z "$findings" ] || [ "$findings" = "null" ]; then printf 'malformed'; return; fi
+    sha=$(jq -r 'if type == "object" then (.head_sha // .sha // empty) else empty end' "$SEC" 2>/dev/null)
+    if [ -z "$sha" ]; then printf 'unpinned'; return; fi
+    if [ -n "$HEAD_SHA" ] && [ "$sha" != "$HEAD_SHA" ]; then printf 'stale'; return; fi
+    crit=$(printf '%s' "$findings" | jq '[ .[] | select((.severity // "" | ascii_downcase) == "critical" and (.status // "open" | ascii_downcase) == "open") ] | length' 2>/dev/null)
+    case "$crit" in ''|*[!0-9]*) printf 'malformed'; return ;; esac
+    if [ "$crit" -gt 0 ]; then printf 'critical'; return; fi
+    printf 'clean'
+  }
+
+  # ===========================================================================
+  # GATE 1 — no ESCALATION marker
+  # ===========================================================================
+  if [ -f "$ESCALATION" ]; then
+    reason="ESCALATE_HUMAN"
+    detail=$(head -c 800 "$ESCALATION" 2>/dev/null)
+    deny "MERGE GATE ($reason): .quetrex/ESCALATION is present — a bounded self-heal/review loop hit its cap and the pipeline stopped. This merge is BLOCKED until a human resolves the escalation. Surface it to the user and run /quetrex:task-rework; do not delete ESCALATION to force the merge.${detail:+ --- escalation note --- $detail}"
+  fi
+
+  # ===========================================================================
+  # GATE 2 — review verdict must be AUTO_MERGE, for THIS head commit
+  # ===========================================================================
+  if [ ! -f "$RV" ]; then
+    deny "MERGE GATE (REWORK): .quetrex/review-verdict.json is missing — the review-gate never ran on this branch. Run the pipeline's review-gate (native /review + /security-review) before merging '$merge_kind'."
+  fi
+  VERDICT=$(jq -r '.verdict // empty' "$RV" 2>/dev/null)
+  RV_SHA=$(jq -r '.sha // .head_sha // empty' "$RV" 2>/dev/null)
+
+  # The review-gate (agents/reviewer.md) writes EXACTLY one of:
+  #   AUTO_MERGE | REWORK | ESCALATE_HUMAN
+  # These strings are the contract; they must match here byte-for-byte. Legacy
+  # reviewer strings (BLOCK/APPROVE/ESCALATE) are still recognized defensively so
+  # an older artifact never silently falls through the catch-all as "AUTO_MERGE".
+  case "$VERDICT" in
+    AUTO_MERGE)
+      : ;; # candidate — sha check below still applies
+    REWORK|BLOCK)
+      # BLOCK is the legacy reviewer verdict; treat as REWORK under the new policy.
+      conf=$(jq -rc '(.confirmed // [] | length) as $c | "\($c) confirmed finding(s)"' "$RV" 2>/dev/null)
+      deny "MERGE GATE (REWORK): review verdict is '$VERDICT'${conf:+ ($conf)}, not AUTO_MERGE. Defects were found — this merge is denied. Send the task back through the pipeline (developer → qa → review-gate); it will merge automatically once the verdict is AUTO_MERGE."
       ;;
-    *://*)
-      deny "MERGE GATE (ESCALATE_HUMAN): the PR identifier '$PARSED_PR_ID' looks like a URL this gate doesn't recognize as a GitHub PR URL. A merge must never be evaluated by guessing which repository it names."
+    ESCALATE_HUMAN|ESCALATE)
+      # ESCALATE_HUMAN is the current contract string; ESCALATE is the legacy alias.
+      deny "MERGE GATE (ESCALATE_HUMAN): review verdict is '$VERDICT' — the review-gate was uncertain, hit its rework cap, or referred this to a human. Do NOT auto-merge. Surface the verdict and its findings to the user and let them decide (/quetrex:task-rework)."
+      ;;
+    APPROVE)
+      # Legacy reviewer verdict. Under the NEW merge policy only the review-gate's
+      # explicit AUTO_MERGE authorizes a human-free merge; a bare APPROVE is not
+      # that decision, so escalate rather than auto-ship.
+      deny "MERGE GATE (ESCALATE_HUMAN): review verdict is the legacy 'APPROVE', but the new merge policy authorizes an auto-merge ONLY on an explicit 'AUTO_MERGE' verdict from the review-gate. Run the review-gate to produce a 3-way decision (AUTO_MERGE | REWORK | ESCALATE_HUMAN), or have a human confirm."
+      ;;
+    ""|*)
+      deny "MERGE GATE (ESCALATE_HUMAN): review verdict is '${VERDICT:-<missing>}', which is not a recognized decision (AUTO_MERGE | REWORK | ESCALATE_HUMAN). The review artifact is malformed or partial — do not merge. Surface to the user and re-run the review-gate."
       ;;
   esac
 
-  # gh ALSO reads GH_REPO from the environment when no --repo/-R flag is on
-  # the command line — this hook's OWN process environment is the same one
-  # the real `gh pr merge` will run in, so an exported GH_REPO here is a
-  # genuine signal, not noise. This is exactly why the flag-parsed value
-  # above lives in PARSED_REPO, never in a variable literally named
-  # GH_REPO: reusing gh's own environment-variable name for internal state
-  # made an ambiently-exported GH_REPO indistinguishable from "the command
-  # itself set --repo" — the classic collision. If this fires on a
-  # same-repo merge unexpectedly, `unset GH_REPO` in the shell and retry.
-  ENV_REPO=$(printf '%s' "${GH_REPO:-}" | tr 'A-Z' 'a-z')
-
-  # An inline/env-wrapped `GH_REPO=` assignment ON THIS SAME SEGMENT
-  # (`GH_REPO=x gh pr merge`, `env GH_REPO=x gh pr merge`) is a signal too
-  # — captured by normalize_segment above into VECTOR_GH_REPO_PREFIX rather
-  # than silently discarded along with the rest of the prefix. An `export
-  # GH_REPO=x;` on an EARLIER, separate segment of the same line is NOT
-  # covered here — see the boundary note near the top of this file for why.
-  PREFIX_REPO_RAW=$(printf '%s' "$VECTOR_GH_REPO_PREFIX" | sed 's/^["'\'']*//; s/["'\'']*$//')
-  FLAG_REPO_RAW=$(printf '%s' "$PARSED_REPO" | sed 's/^["'\'']*//; s/["'\'']*$//')
-
-  # An unexpanded shell variable/command-substitution in the repo VALUE
-  # position ($SLUG, ${SLUG}, $(...), `...`) is treated as UNKNOWN — not as
-  # a literal repo name to compare — and dropped from the signal set (fail
-  # OPEN, for this signal only). This hook parses TEXT; it does not execute
-  # a shell and cannot know what $SLUG will resolve to. FAIL-CLOSED here was
-  # considered and rejected: this exact shape is what this engine's OWN
-  # `/quetrex:merge` command emits (`gh pr merge "$PR_NUM" --repo "$SLUG"
-  # ...`, with SLUG computed from the local repo's own origin earlier in
-  # the same script) — denying on an unresolvable expression would deny
-  # that command for the SAME reason every time, breaking the pipeline's
-  # own merge step outright. The residual risk is bounded: a value set via
-  # a mechanism this hook DOES track (an inherited/inline GH_REPO, above)
-  # is still caught by THAT signal independently of what this flag's own
-  # value says; a value set via a mechanism this hook does not track at
-  # all (a shell function, a sourced file) is already out of bounds
-  # regardless — see the boundary note — and fail-closed here would not
-  # close that gap, only break the common, legitimate case.
-  if looks_like_shell_expr "$FLAG_REPO_RAW"; then
-    FLAG_REPO=""
-  else
-    FLAG_REPO=$(printf '%s' "$FLAG_REPO_RAW" | tr 'A-Z' 'a-z')
+  # Verdict is AUTO_MERGE. Bind it to the exact commit being merged: if new commits
+  # landed after review, the verdict no longer describes what would ship.
+  if [ -z "$RV_SHA" ]; then
+    deny "MERGE GATE (REWORK): review-verdict.json has verdict AUTO_MERGE but records no commit sha, so it cannot be pinned to what is being merged. Re-run the review-gate so it records the reviewed HEAD sha."
   fi
-  if looks_like_shell_expr "$PREFIX_REPO_RAW"; then
-    PREFIX_REPO=""
-  else
-    PREFIX_REPO=$(printf '%s' "$PREFIX_REPO_RAW" | tr 'A-Z' 'a-z')
+  if [ -n "$HEAD_SHA" ] && [ "$RV_SHA" != "$HEAD_SHA" ]; then
+    deny "MERGE GATE (REWORK): the AUTO_MERGE verdict is for commit ${RV_SHA:0:12}, but HEAD is now ${HEAD_SHA:0:12} — commits landed after review, so the approval is stale. Re-run the review-gate against the current HEAD before merging."
   fi
 
-  # Collect DISTINCT non-empty repo signals. More than one, disagreeing, is
-  # ambiguous — refuse to guess which one gh will actually honor rather
-  # than picking one and being wrong.
-  SIGNAL_SET=""
-  for sig in "$FLAG_REPO" "$PREFIX_REPO" "$URL_REPO" "$ENV_REPO"; do
-    [ -z "$sig" ] && continue
-    case " $SIGNAL_SET " in
-      *" $sig "*) : ;;
-      *) SIGNAL_SET="$SIGNAL_SET $sig" ;;
-    esac
-  done
-  SIGNAL_SET=$(printf '%s' "$SIGNAL_SET" | sed 's/^ *//; s/ *$//')
-  SIGNAL_COUNT=0
-  [ -n "$SIGNAL_SET" ] && SIGNAL_COUNT=$(printf '%s\n' "$SIGNAL_SET" | wc -w | tr -d ' ')
-
-  if [ "$SIGNAL_COUNT" -gt 1 ]; then
-    deny "MERGE GATE (ESCALATE_HUMAN): this command's repository selectors disagree — flag/prefix-assignment/PR-URL/environment GH_REPO name different repos ($SIGNAL_SET). This gate will not guess which one 'gh' will actually honor; a wrong guess here means authorizing a merge in a repo these artifacts say nothing about."
-  elif [ "$SIGNAL_COUNT" -eq 1 ]; then
-    EFFECTIVE_REPO="$SIGNAL_SET"
-    ORIGIN_SLUG=$(git -C "$ROOT" remote get-url origin 2>/dev/null \
-      | sed -e 's#\.git$##' -e 's#.*[:/]\([^/][^/]*/[^/][^/]*\)$#\1#' | tr 'A-Z' 'a-z')
-    if [ -n "$ORIGIN_SLUG" ] && [ "$EFFECTIVE_REPO" != "$ORIGIN_SLUG" ]; then
-      deny "MERGE GATE (ESCALATE_HUMAN): this command merges a PR in '$EFFECTIVE_REPO', but it is running against a checkout of '$ORIGIN_SLUG'. The gate artifacts here (review verdict, verify ledger, security findings) describe '$ORIGIN_SLUG' and say NOTHING about '$EFFECTIVE_REPO', so it cannot evaluate this merge — and it will not judge one repo by another repo's verdict. Run the merge from inside a checkout of '$EFFECTIVE_REPO' so that repo's own gates apply."
-    fi
-  fi
-fi
-
-LEDGER="$QDIR/verify-ledger.jsonl"
-RV="$QDIR/review-verdict.json"
-SEC="$QDIR/security-findings.json"
-ESCALATION="$QDIR/ESCALATION"
-
-HEAD_SHA=$(git -C "$ROOT" rev-parse HEAD 2>/dev/null)
-
-# --- gh pr merge: pin every gate to the PR's HEAD COMMIT, not local HEAD ----
-#
-# THE BUG THIS FIXES (reproduced live 2026-08-07). Every gate below compares
-# its artifact's recorded sha against $HEAD_SHA under the assumption that
-# $HEAD_SHA IS the commit being merged. That holds for `push to main` and
-# `merge into main` — the local checkout literally becomes that commit. It is
-# FALSE for `gh pr merge`: the commit actually being merged is the PR's head
-# commit, but the local checkout is almost always sitting on main (wherever
-# `cd`/`git -C` last left it). A review verdict correctly pinned to the PR's
-# real head (11f84d2) was denied as "stale" solely because it was compared
-# against local main's tip (b7bf116) — nothing was actually stale, and the
-# operator's only escape was to check out the PR head by hand.
-#
-# Resolve the PR's real head commit from the PR itself and, for this vector
-# ONLY, use it as $HEAD_SHA for every gate below — including the diff-content
-# gates (the sensitive-surface preamble and GATE 5's ownership check), which
-# is why the fetch below exists: reading $CHANGED/$ADDED off $ROOT's local
-# `HEAD` was the SAME defect wearing a second hat. A sensitive PR merged with
-# no security review, and a clean PR was denied for touching a file it never
-# touched, because both gates were silently diffing local main's last commit
-# instead of the PR. Non-PR vectors (push to main, merge into main) are
-# untouched — local HEAD keeps governing them exactly as before, because for
-# THEM local HEAD genuinely is the commit being shipped.
-#
-# The BASE end of that diff matters just as much as the head end, and gets
-# the SAME treatment: also resolved from the PR (its baseRefOid — the base
-# branch's CURRENT tip on GitHub), not from $ROOT's local `main`/`master`
-# ref. A checkout that is behind origin is the routine case, not an edge
-# case — the cloud cuts the PR branch off current main while the laptop
-# hasn't pulled — and diffing against a stale local base OVER-reports: files
-# another team already merged to main show up as "changed by this PR" and
-# get denied as unowned, or scanned for sensitivity, when they were never
-# part of it.
-#
-# FAIL CLOSED: if either ref cannot be resolved or fetched (gh missing, PR
-# not found, not authenticated, network hiccup), DENY. A merge that cannot
-# be evaluated against its real content is never let through unevaluated.
-if [ "$merge_kind" = "gh pr merge" ]; then
-  # PARSED_PR_ID and EFFECTIVE_REPO were already resolved above — the SAME
-  # parse pass that decided the cross-repo refusal — and are reused here
-  # rather than re-parsing $VECTOR_SEG a second time with separate logic.
-  # Two independent regex passes over the same string disagreeing about
-  # which repo/PR-id a command named is exactly the shape of bug this
-  # unification closes.
-
-  # One call, both refs — headRefOid AND baseRefOid — parsed locally with jq
-  # rather than gh's own --jq, so a single captured payload answers both.
-  if [ -n "$EFFECTIVE_REPO" ]; then
-    if [ -n "$PARSED_PR_ID" ]; then
-      PR_VIEW_JSON=$(cd "$ROOT" 2>/dev/null && gh pr view "$PARSED_PR_ID" --repo "$EFFECTIVE_REPO" --json headRefOid,baseRefOid 2>/dev/null)
-    else
-      PR_VIEW_JSON=$(cd "$ROOT" 2>/dev/null && gh pr view --repo "$EFFECTIVE_REPO" --json headRefOid,baseRefOid 2>/dev/null)
-    fi
-  else
-    if [ -n "$PARSED_PR_ID" ]; then
-      PR_VIEW_JSON=$(cd "$ROOT" 2>/dev/null && gh pr view "$PARSED_PR_ID" --json headRefOid,baseRefOid 2>/dev/null)
-    else
-      PR_VIEW_JSON=$(cd "$ROOT" 2>/dev/null && gh pr view --json headRefOid,baseRefOid 2>/dev/null)
-    fi
-  fi
-  PR_HEAD_SHA=$(printf '%s' "${PR_VIEW_JSON:-}" | jq -r '.headRefOid // empty' 2>/dev/null)
-  PR_BASE_SHA=$(printf '%s' "${PR_VIEW_JSON:-}" | jq -r '.baseRefOid // empty' 2>/dev/null)
-
-  if [ -z "$PR_HEAD_SHA" ] || ! [[ "$PR_HEAD_SHA" =~ ^[0-9a-f]{7,40}$ ]]; then
-    deny "MERGE GATE (ESCALATE_HUMAN): could not resolve the PR's head commit (\`gh pr view${PARSED_PR_ID:+ $PARSED_PR_ID}${EFFECTIVE_REPO:+ --repo $EFFECTIVE_REPO} --json headRefOid,baseRefOid\` failed or returned nothing usable). A merge must never be evaluated against the wrong commit, or left unevaluated — check that 'gh' is installed and authenticated and that the PR exists, then retry."
-  fi
-  if [ -z "$PR_BASE_SHA" ] || ! [[ "$PR_BASE_SHA" =~ ^[0-9a-f]{7,40}$ ]]; then
-    deny "MERGE GATE (ESCALATE_HUMAN): resolved the PR's head commit but not its base (\`gh pr view${PARSED_PR_ID:+ $PARSED_PR_ID}${EFFECTIVE_REPO:+ --repo $EFFECTIVE_REPO} --json headRefOid,baseRefOid\` returned no usable baseRefOid). Without the PR's real base, the diff-based gates cannot tell what THIS PR changed versus what was already on main — do not guess by falling back to local HEAD."
-  fi
-  HEAD_SHA="$PR_HEAD_SHA"
-  DIFF_BASE="$PR_BASE_SHA"
-
-  # The diff-content gates below need the ACTUAL commit objects for both ends
-  # of the range, not just their sha strings. The primary checkout may never
-  # have fetched the PR branch (pushed from a worktree, or built entirely in
-  # the cloud) — or may simply be BEHIND origin/main, which is the routine
-  # case, not an edge case. Either way, `git diff` against a missing object
-  # silently reads as "no changes", and diffing against a stale local base
-  # over-reports files someone else already merged. Fetch whatever is
-  # missing. FAIL CLOSED: an uninspectable diff must never be treated as
-  # clean, or its ownership as violated, by omission — deny rather than
-  # evaluate blind.
+  # --- GATE 2b — the reviewer may not self-exempt from independent review ------
+  # reviewer.md's decision rule 4 mandates ESCALATE_HUMAN when the native /review
+  # or /security-review "errored or could not run on a non-trivial change". But
+  # the agent that decides the verdict is ALSO the agent that reports whether
+  # independent review ran — so that rule is self-graded, and it has already been
+  # broken in the wild: a live verdict artifact recorded AUTO_MERGE over 18
+  # reviewed files with nativeSecurityReview "not_available_in_env" and
+  # nativeReview "not_run_no_pr".
   #
-  # The existence check runs BOTH before AND after the fetch: `git fetch`
-  # exiting 0 is not, by itself, proof the object is now present (a wrapper,
-  # a partial fetch, or an oddly-configured remote could exit clean without
-  # it) — cat-file is what's actually trusted, both times.
-  ensure_commit_fetched() {  # ensure_commit_fetched <sha> <label> -> denies on failure
-    local sha="$1" label="$2"
-    git -C "$ROOT" cat-file -e "${sha}^{commit}" 2>/dev/null && return 0
-    if ! git -C "$ROOT" fetch --no-tags -q origin "$sha" 2>/dev/null; then
-      deny "MERGE GATE (ESCALATE_HUMAN): resolved the PR's $label commit (${sha:0:12}) but could not fetch it into this checkout ('git fetch origin ${sha:0:12}' failed) — the diff-based gates (sensitive-surface detection, file-ownership) cannot inspect what is actually being merged without it, and evaluating them against local HEAD instead would silently describe the wrong commit. Fetch the PR branch into this checkout (e.g. 'git fetch origin pull/<n>/head') and retry."
-    fi
-    if ! git -C "$ROOT" cat-file -e "${sha}^{commit}" 2>/dev/null; then
-      deny "MERGE GATE (ESCALATE_HUMAN): 'git fetch origin ${sha:0:12}' exited 0 but the $label commit (${sha:0:12}) still is not present in this checkout — refusing to trust the fetch's exit code alone. Fetch the PR branch into this checkout manually and retry."
-    fi
-  }
-  ensure_commit_fetched "$PR_HEAD_SHA" "head"
-  ensure_commit_fetched "$PR_BASE_SHA" "base"
-fi
+  # Mechanize it here. An AUTO_MERGE is only honored when the artifact
+  # AFFIRMATIVELY records that the native security pass actually executed:
+  #   "clean"  -> it ran and found nothing
+  #   "issues" -> it ran and found something the reviewer then adjudicated
+  # WHY THIS NO LONGER DEMANDS THE NATIVE FIELD *ONLY*. Requiring
+  # nativeSecurityReview to be "clean"/"issues" made AUTO_MERGE UNREACHABLE, and
+  # so made this whole pipeline a manual one. `/security-review` is a
+  # SlashCommand, and the reviewer subagent does not have SlashCommand in its
+  # runtime tool set — observed repeatedly, the agent reporting "my tool set is
+  # Read and Bash only" — even though reviewer.md declares it. The field is
+  # therefore STRUCTURALLY unfillable: every verdict recorded
+  # "not_available_in_env", every clean pipeline was denied, every merge was done
+  # by hand on GitHub, and none of the pipeline's post-merge bookkeeping ever ran
+  # (which is also why tasks stranded in in_progress).
+  #
+  # The requirement this gate actually encodes is INDEPENDENCE: the agent that
+  # decided the verdict must not be the only thing asserting security was
+  # reviewed. The dedicated security-reviewer AGENT satisfies that on its own —
+  # a different agent, fresh context, whose ONLY write is
+  # .quetrex/security-findings.json. So independence may now be proven EITHER
+  # way, and nothing else:
+  #
+  #   1. the native pass actually ran            -> nativeSecurityReview clean|issues
+  #   2. the independent security-reviewer ran   -> security-findings.json, pinned
+  #                                                 to HEAD, zero open Critical
+  #   3. no security review was required at all  -> neutral diff AND no plan flag
+  #                                                 AND no artifact to contradict
+  #
+  # Everything else still denies, including a missing field with no artifact, an
+  # unpinned or stale artifact, and any open Critical. Omitting a field remains
+  # no cheaper than filling it in honestly, and an open Critical is still
+  # unbypassable (GATE 4 re-checks it independently of this gate).
+  RV_NATIVE_SEC=$(jq -r '(.inputs.nativeSecurityReview // .nativeSecurityReview // empty) | ascii_downcase' "$RV" 2>/dev/null)
+  case "$RV_NATIVE_SEC" in
+    clean|issues) : ;;
+    *)
+      SEC_STATE=$(sec_artifact_state)
+      case "$SEC_STATE" in
+        clean)
+          # (2) An independent pass IS on record for this exact commit.
+          : ;;
+        missing)
+          if [ "$NEED_SEC" = "true" ]; then
+            deny "MERGE GATE (REWORK): the verdict is AUTO_MERGE and the native /security-review did not run (inputs.nativeSecurityReview = '${RV_NATIVE_SEC:-<missing>}'), so the independent security-reviewer artifact is the only thing that could back this merge — and .quetrex/security-findings.json does not exist. A security review is required here because $SEC_WHY. Run the security-reviewer agent against the current HEAD, then re-run the review-gate."
+          fi
+          # (3) Not required, nothing sensitive, no artifact to contradict: there
+          #     is no security review to be independent ABOUT. Allow.
+          ;;
+        *)
+          deny "MERGE GATE (ESCALATE_HUMAN): the verdict is AUTO_MERGE and the native /security-review did not run (inputs.nativeSecurityReview = '${RV_NATIVE_SEC:-<missing>}'), so .quetrex/security-findings.json must supply the independent pass — but that artifact is '$SEC_STATE'$([ "$SEC_STATE" = "stale" ] && printf ' (it records a different commit than HEAD %s)' "${HEAD_SHA:0:12}")$([ "$SEC_STATE" = "unpinned" ] && printf ' (it records no head_sha, so it proves nothing about this commit)')$([ "$SEC_STATE" = "critical" ] && printf ' (it has open Critical finding(s) — see GATE 4)'). Re-run the security-reviewer against the current HEAD so a pinned, clean finding set exists, or have a human decide."
+          ;;
+      esac
+      ;;
+  esac
 
-# ===========================================================================
-# PREAMBLE — is a security review REQUIRED for this diff, and what does the
-#            independent security artifact say?
-# ===========================================================================
-# Computed HERE, before GATE 2b, because 2b now needs both answers (it used to
-# demand a field the reviewer structurally cannot fill — see GATE 2b). Pure
-# reads, no side effects; GATE 4 and GATE 5 reuse the same values below.
-#
-# A security review is REQUIRED when EITHER of these holds:
-#   (a) the plan set security_review_required:true (router/architect forced it), OR
-#   (b) the ACTUAL diff being merged touches a sensitive surface — auth/authz,
-#       input handling, secrets/crypto, external calls, data-access, or a DB
-#       migration — regardless of what the plan says.
-# (b) is the floor that makes security non-bypassable: a plan that simply omits
-# the flag (defaulting it false) cannot ship sensitive code unreviewed, because
-# the gate inspects the diff itself, not the agent's classification of it.
-PLAN=""
-TASK=$(jq -r '.task // empty' "$QDIR/state.json" 2>/dev/null)
-if [ -n "$TASK" ] && [ -f "$QDIR/plan/$TASK.json" ]; then
-  PLAN="$QDIR/plan/$TASK.json"
-else
-  # Fall back to any single plan file if state.json is unavailable.
-  PLAN=$(ls -1 "$QDIR"/plan/*.json 2>/dev/null | head -n1)
-fi
-PLAN_SEC="false"
-[ -n "$PLAN" ] && PLAN_SEC=$(jq -r '.security_review_required // false' "$PLAN" 2>/dev/null)
-
-# --- (b) inspect the real diff for a sensitive surface ---------------------
-# Diff the commit actually being merged ($HEAD_SHA — the PR's head for a
-# `gh pr merge`, local HEAD for everything else; see above) against its real
-# base ($DIFF_BASE — the PR's own baseRefOid for a `gh pr merge`, resolved
-# above; local main/master for everything else). Three-dot range = what
-# $HEAD_SHA changed since it diverged from $DIFF_BASE. Deliberately NOT the
-# literal refs `HEAD`/`main`: for a `gh pr merge`, the local checkout is not
-# on the head commit, and local `main` can be BEHIND the PR's actual base —
-# diffing against a stale local base over-reports files someone else already
-# merged as "changed by this PR" (see the resolution block above).
-if [ -z "${DIFF_BASE:-}" ]; then
-  DIFF_BASE="main"
-  if ! git -C "$ROOT" rev-parse --verify --quiet main >/dev/null 2>&1; then
-    git -C "$ROOT" rev-parse --verify --quiet master >/dev/null 2>&1 && DIFF_BASE="master"
+  # ===========================================================================
+  # GATE 3 — verify ledger green AND commit-pinned to HEAD (closes stale-green)
+  # ===========================================================================
+  # Rule: for EVERY command in the current verify chain, its MOST RECENT ledger
+  # entry must (a) have exited 0 AND (b) carry a `sha` equal to the CURRENT HEAD.
+  # A chain command that never ran (absent from the ledger), whose latest run was
+  # non-zero, OR whose latest green was proven against a DIFFERENT commit than the
+  # one being merged, all BLOCK. The sha pin is what makes this immune to a green
+  # line written for an earlier commit: if new commits landed after QA proved
+  # green, that green no longer describes HEAD and cannot authorize the merge.
+  if [ ! -s "$LEDGER" ]; then
+    deny "MERGE GATE (REWORK): .quetrex/verify-ledger.jsonl is missing or empty — QA never proved the verify chain green. Run the pipeline's QA stage before merging."
   fi
-fi
-SENSITIVE_DIFF=0
-CHANGED=$(git -C "$ROOT" diff --name-only "$DIFF_BASE"..."$HEAD_SHA" 2>/dev/null)
-# Fall back to the last commit's files if the base range can't be computed.
-[ -z "$CHANGED" ] && CHANGED=$(git -C "$ROOT" diff --name-only "$HEAD_SHA"~1.."$HEAD_SHA" 2>/dev/null)
-SENSITIVE_PATH_RE='(auth|authz|authn|login|logout|signin|sign-in|session|oauth|openid|saml|sso|jwt|token|secret|credential|password|passwd|crypto|encrypt|decrypt|cipher|migration|migrate|schema|\.sql$|payment|billing|invoice|checkout|charge|stripe|paypal|permission|role|rbac|tenant|acl|middleware|guard|policy|webhook|\.github/workflows/|dockerfile|docker-compose|terraform|pulumi|kubernetes|k8s|helm)'
-if [ -n "$CHANGED" ] && printf '%s\n' "$CHANGED" | grep -qiE "$SENSITIVE_PATH_RE"; then
-  SENSITIVE_DIFF=1
-fi
-# Also scan ADDED lines for sensitive code patterns even when the path is neutral
-# (data-access by client id, whole-body binding, injection sinks, env/secret use,
-# external calls). Only added (+) lines to avoid flagging deletions.
-if [ "$SENSITIVE_DIFF" -eq 0 ]; then
-  ADDED=$(git -C "$ROOT" diff "$DIFF_BASE"..."$HEAD_SHA" 2>/dev/null | grep -E '^\+' | grep -vE '^\+\+\+')
-  [ -z "$ADDED" ] && ADDED=$(git -C "$ROOT" diff "$HEAD_SHA"~1.."$HEAD_SHA" 2>/dev/null | grep -E '^\+' | grep -vE '^\+\+\+')
-  SENSITIVE_CODE_RE='(findById|find_by_id|findOne|req\.(params|query|body)|request\.(args|form|json|params)|Object\.assign|dangerouslySetInnerHTML|innerHTML|v-html|child_process|execSync|spawnSync|[^a-zA-Z]eval\(|process\.env|os\.environ|getenv|jwt\.|bcrypt|scrypt|argon2|createHash|createCipher|\.raw\(|\$where|authorize\(|authenticate|passport|fetch\(|axios|http\.request|urllib|requests\.(get|post))'
-  if [ -n "$ADDED" ] && printf '%s' "$ADDED" | grep -qE "$SENSITIVE_CODE_RE"; then
-    SENSITIVE_DIFF=1
+
+  # Resolve the current verify chain (single source of truth: verify.json).
+  CHAIN_JSON=$(jq -c 'if (.verify | type) == "array" and (.verify | length) > 0 then .verify else empty end' "$QDIR/verify.json" 2>/dev/null)
+
+  if [ -n "$CHAIN_JSON" ]; then
+    # For each chain command, its latest ledger entry must be exit 0 AND for HEAD.
+    # null exit = never ran = fail; a sha != HEAD = stale-green = fail.
+    RED=$(jq -sc --argjson chain "$CHAIN_JSON" --arg head "$HEAD_SHA" '
+      (reduce .[] as $e ({}; .[$e.cmd] = {exit:$e.exit, sha:($e.sha // "")})) as $last
+      | [ $chain[]
+          | ($last[.] // {exit:null, sha:null}) as $l
+          | { cmd: ., exit: $l.exit, sha: $l.sha }
+          | select(.exit != 0 or (.sha != $head)) ]
+    ' "$LEDGER" 2>/dev/null)
+  else
+    # No canonical chain resolvable — fall back to: every command that appears in
+    # the ledger must have its latest run green AND pinned to HEAD (conservative;
+    # a lingering red or stale-commit command blocks). Still refuses stale-green.
+    RED=$(jq -sc --arg head "$HEAD_SHA" '
+      (reduce .[] as $e ({}; .[$e.cmd] = {exit:$e.exit, sha:($e.sha // "")}))
+      | to_entries
+      | map(select(.value.exit != 0 or (.value.sha != $head)) | {cmd:.key, exit:.value.exit, sha:.value.sha})
+    ' "$LEDGER" 2>/dev/null)
   fi
-fi
 
-NEED_SEC="false"; SEC_WHY=""
-if [ "$PLAN_SEC" = "true" ]; then
-  NEED_SEC="true"; SEC_WHY="the plan set security_review_required:true"
-elif [ "$SENSITIVE_DIFF" -eq 1 ]; then
-  NEED_SEC="true"; SEC_WHY="the diff touches a sensitive surface (auth/authz/input/secrets/crypto/external-call/data-access/migration)"
-fi
+  if [ -z "$RED" ] || [ "$RED" = "null" ]; then
+    # jq failed to evaluate the ledger at the ship boundary -> fail closed.
+    deny "MERGE GATE (ESCALATE_HUMAN): could not evaluate .quetrex/verify-ledger.jsonl (malformed JSONL?). The verify chain cannot be proven green, so the merge is denied. Surface to the user."
+  fi
+  if [ "$RED" != "[]" ]; then
+    SUMMARY=$(printf '%s' "$RED" | jq -r --arg head "$HEAD_SHA" 'map("  - `\(.cmd)` -> \(if .exit == null then "never ran (no ledger entry)" elif (.exit != 0) then "exit \(.exit)" else "STALE: last green was for commit \((.sha // "?")[0:12]), not HEAD \($head[0:12]) — re-run QA on the current commit" end)") | join("\n")' 2>/dev/null)
+    deny "$(printf 'MERGE GATE (REWORK): the verify chain is not green for the commit being merged. The following command(s) are red, never ran, or stale (proven against a different commit):\n%s\nFix the code and let QA re-prove the chain green (every command exit 0) ON THE CURRENT HEAD before merging.' "$SUMMARY")"
+  fi
 
-# sec_artifact_state — what the INDEPENDENT security-reviewer artifact proves
-# about the exact commit being merged. Echoes exactly one of:
-#   missing | malformed | unpinned | stale | critical | clean
-# Stricter than GATE 4 on one point: a head_sha is MANDATORY here, because in
-# GATE 2b this artifact is load-bearing as proof of an independent pass, and an
-# unpinned finding set proves nothing about this commit.
-sec_artifact_state() {
-  [ -f "$SEC" ] || { printf 'missing'; return; }
-  local findings sha crit
-  findings=$(jq -c 'if type == "object" then (.findings // []) else . end' "$SEC" 2>/dev/null)
-  if [ -z "$findings" ] || [ "$findings" = "null" ]; then printf 'malformed'; return; fi
-  sha=$(jq -r 'if type == "object" then (.head_sha // .sha // empty) else empty end' "$SEC" 2>/dev/null)
-  if [ -z "$sha" ]; then printf 'unpinned'; return; fi
-  if [ -n "$HEAD_SHA" ] && [ "$sha" != "$HEAD_SHA" ]; then printf 'stale'; return; fi
-  crit=$(printf '%s' "$findings" | jq '[ .[] | select((.severity // "" | ascii_downcase) == "critical" and (.status // "open" | ascii_downcase) == "open") ] | length' 2>/dev/null)
-  case "$crit" in ''|*[!0-9]*) printf 'malformed'; return ;; esac
-  if [ "$crit" -gt 0 ]; then printf 'critical'; return; fi
-  printf 'clean'
+  # ===========================================================================
+  # GATE 4 — security findings: no open Critical, pinned to HEAD; required-but-
+  #          missing is a failure. NON-BYPASSABLE-BY-OMISSION.
+  # ===========================================================================
+  # PLAN_SEC, SENSITIVE_DIFF, CHANGED, NEED_SEC and SEC_WHY are all computed in
+  # the PREAMBLE above (GATE 2b needs them too). This gate consumes them.
+  if [ ! -f "$SEC" ]; then
+    if [ "$NEED_SEC" = "true" ]; then
+      deny "MERGE GATE (REWORK): a security review is required because $SEC_WHY, but .quetrex/security-findings.json is missing — the mandatory security-reviewer stage did not run for this change. Run the security-reviewer against the current HEAD before merging. This requirement cannot be bypassed by omitting the plan flag."
+    fi
+    # Security review not required (neutral diff, no plan flag) and not present -> Gate 4 passes.
+  else
+    # security-findings.json exists. Support BOTH the documented object shape
+    # ({head_sha, verdict, findings:[...]}) and a bare array of findings.
+    FINDINGS=$(jq -c 'if type == "object" then (.findings // []) else . end' "$SEC" 2>/dev/null)
+    if [ -z "$FINDINGS" ] || [ "$FINDINGS" = "null" ]; then
+      deny "MERGE GATE (ESCALATE_HUMAN): .quetrex/security-findings.json is malformed and cannot be parsed. The merge is denied until the security findings are readable. Surface to the user."
+    fi
+
+    # Pin to HEAD when the artifact records a head_sha (object shape only).
+    SEC_SHA=$(jq -r 'if type == "object" then (.head_sha // .sha // empty) else empty end' "$SEC" 2>/dev/null)
+    if [ -n "$SEC_SHA" ] && [ -n "$HEAD_SHA" ] && [ "$SEC_SHA" != "$HEAD_SHA" ]; then
+      deny "MERGE GATE (REWORK): the security review is for commit ${SEC_SHA:0:12}, but HEAD is now ${HEAD_SHA:0:12} — the review is stale. Re-run the security-reviewer against the current HEAD before merging."
+    fi
+
+    OPEN_CRIT=$(printf '%s' "$FINDINGS" | jq '[ .[] | select((.severity // "" | ascii_downcase) == "critical" and (.status // "open" | ascii_downcase) == "open") ] | length' 2>/dev/null)
+    case "$OPEN_CRIT" in ''|*[!0-9]*) OPEN_CRIT=-1 ;; esac
+    if [ "$OPEN_CRIT" -lt 0 ]; then
+      deny "MERGE GATE (ESCALATE_HUMAN): could not evaluate open Critical findings in security-findings.json. The merge is denied until the artifact is verifiably clean. Surface to the user."
+    fi
+    if [ "$OPEN_CRIT" -gt 0 ]; then
+      LIST=$(printf '%s' "$FINDINGS" | jq -r '[ .[] | select((.severity // "" | ascii_downcase) == "critical" and (.status // "open" | ascii_downcase) == "open") ] | map("  - \(.category // "?") @ \(.file // "?"):\(.line // "?") — \(.summary // .exploit // "critical finding")") | join("\n")' 2>/dev/null)
+      deny "$(printf 'MERGE GATE (REWORK): %s open Critical security finding(s) block this merge:\n%s\nFix the vulnerabilit(y/ies) and re-run the security-reviewer until zero Critical remain open. Human approval CANNOT bypass an open Critical.' "$OPEN_CRIT" "$LIST")"
+    fi
+  fi
+
+  # ===========================================================================
+  # GATE 5 — every changed file is covered by the architect's ownership map
+  # ===========================================================================
+  # The whole parallel-developer architecture rests on ONE artifact: the
+  # architect's zero-overlap file-ownership map (architect.md calls it "the
+  # enforceable contract developers are held to"). Until this gate existed, that
+  # contract was enforced by nobody — it appeared exactly once downstream, as
+  # prose in reviewer.md asking an LLM to notice. A developer that edited outside
+  # its lane produced the classic silent failure: a clean summary, an unexpected
+  # file, and every other gate green because none of them look at file paths.
+  #
+  # This gate looks. It reuses $CHANGED — the same diff GATE 4 already computed
+  # against the base branch — and asserts each path is claimed either by an
+  # explicit `ownership` key or by some workstream's `owns` glob.
+  #
+  # NO PLAN -> SKIP, NOT FAIL. Deliberate, and the same shape as GATE 4 directly
+  # above: GATE 4 reads the plan for security_review_required and, when no plan
+  # exists, does not synthesize a failure — it falls back to a floor derived from
+  # the diff itself. Here there is no equivalent floor: with no plan there is no
+  # ownership map, and "unowned" is undefined rather than violated. TRIVIAL and
+  # SIMPLE routes legitimately run without an architect, so failing closed on a
+  # missing plan would deny merges for work that never had lanes to stay in —
+  # a liveness break, not a safety win. When a plan DOES exist the gate is strict:
+  # a plan carrying no ownership map at all is a malformed artifact and escalates.
+  #
+  # WHICH plan governs is resolved more strictly here than in GATE 4. GATE 4 can
+  # afford `ls | head -n1` because its worst case is requiring a security review
+  # that was not strictly needed. GATE 5's worst case is denying a clean merge for
+  # violating ANOTHER task's lanes, so it refuses to guess: it uses the plan named
+  # by state.json, or the single plan on disk, and escalates when several plans
+  # exist and nothing says which one this merge is for.
+  PLAN5=""
+  if [ -n "$TASK" ] && [ -f "$QDIR/plan/$TASK.json" ]; then
+    PLAN5="$QDIR/plan/$TASK.json"
+  else
+    PLAN_COUNT=$(ls -1 "$QDIR"/plan/*.json 2>/dev/null | wc -l | tr -d ' ')
+    case "$PLAN_COUNT" in ''|*[!0-9]*) PLAN_COUNT=0 ;; esac
+    if [ "$PLAN_COUNT" -eq 1 ]; then
+      PLAN5=$(ls -1 "$QDIR"/plan/*.json 2>/dev/null | head -n1)
+    elif [ "$PLAN_COUNT" -gt 1 ]; then
+      deny "MERGE GATE (ESCALATE_HUMAN): .quetrex/plan/ holds $PLAN_COUNT plan artifacts and .quetrex/state.json does not name the task this merge is for${TASK:+ (it names '$TASK', but .quetrex/plan/$TASK.json does not exist)}, so the gate cannot tell which file-ownership map governs this diff. It will not guess — checking the diff against the wrong task's lanes would reject clean work. Repair .quetrex/state.json (or remove the stale plans) and re-run the review-gate."
+    fi
+    # PLAN_COUNT == 0 -> no plan artifact at all -> skip, per the note above.
+  fi
+
+  if [ -n "$PLAN5" ] && [ -f "$PLAN5" ]; then
+    # Does this plan carry an ownership contract at all?
+    OWN_KEYS=$(jq -r '(.ownership // {}) | keys_unsorted[]?' "$PLAN5" 2>/dev/null)
+    OWN_GLOBS=$(jq -r '(.workstreams // []) | .[]? | (.owns // [])[]?' "$PLAN5" 2>/dev/null)
+
+    if [ -z "$OWN_KEYS" ] && [ -z "$OWN_GLOBS" ]; then
+      deny "MERGE GATE (ESCALATE_HUMAN): the plan artifact $(basename "$PLAN5") exists but declares NO file-ownership map (no .ownership entries and no .workstreams[].owns globs). Ownership is the enforceable contract the parallel-developer pipeline depends on, so a plan without it cannot be checked against the diff. The plan is malformed or partial — do not merge. Surface to the user and re-run the architect."
+    fi
+
+    # Paths that are never owned by a workstream and must not trip the gate:
+    #   .quetrex/**  — the control-plane artifacts this very gate reads. They are
+    #                  written by the pipeline itself (plan, ledger, verdict,
+    #                  state), not by a developer working a lane.
+    #   lockfiles    — regenerated as a side effect of any dependency change, by
+    #                  whichever workstream happened to install. Owning them would
+    #                  force a false overlap between otherwise-disjoint lanes.
+    is_exempt_path() {
+      case "$1" in
+        .quetrex/*) return 0 ;;
+      esac
+      case "$(basename "$1")" in
+        package-lock.json|npm-shrinkwrap.json|yarn.lock|pnpm-lock.yaml|bun.lock|bun.lockb) return 0 ;;
+        Cargo.lock|poetry.lock|uv.lock|Pipfile.lock|Gemfile.lock|composer.lock|go.sum|flake.lock|gradle.lockfile|packages.lock.json) return 0 ;;
+      esac
+      return 1
+    }
+
+    # A path is owned if an `ownership` key matches it exactly, or if it matches
+    # any workstream `owns` glob. Bash pattern matching is used unquoted on the
+    # right of `==` so the glob expands; `**` behaves as `*` here and matches
+    # across `/`, which is the intent for a `src/api/**` style lane.
+    is_owned_path() {
+      local p="$1" k g
+      while IFS= read -r k; do
+        [ -n "$k" ] && [ "$k" = "$p" ] && return 0
+      done <<< "$OWN_KEYS"
+      while IFS= read -r g; do
+        [ -z "$g" ] && continue
+        # shellcheck disable=SC2053
+        [[ "$p" == $g ]] && return 0
+      done <<< "$OWN_GLOBS"
+      return 1
+    }
+
+    UNOWNED=""
+    while IFS= read -r f; do
+      [ -z "$f" ] && continue
+      is_exempt_path "$f" && continue
+      is_owned_path "$f" && continue
+      UNOWNED="${UNOWNED}  - ${f}"$'\n'
+    done <<< "$CHANGED"
+
+    if [ -n "$UNOWNED" ]; then
+      deny "$(printf 'MERGE GATE (REWORK): the diff being merged touches file(s) that NO workstream owns in the architect'"'"'s plan (%s):\n%s\nThe ownership map is the contract that keeps parallel developers from colliding — an edit outside every declared lane is unplanned work that no reviewer signed off on. Send this back through the pipeline: either revert the out-of-lane change, or have the architect re-plan so the file is owned by exactly one workstream, then re-run review. (.quetrex/** and lockfiles are exempt and are not listed here.)' "$(basename "$PLAN5")" "$UNOWNED")"
+    fi
+  fi
+
+  # ===========================================================================
+  # THIS VECTOR'S GATES ARE ALL GREEN — return to the caller, not exit.
+  # ===========================================================================
+  # Emitting no JSON here means "no decision on THIS vector" -- but the hook's
+  # ultimate decision isn't made until every collected vector has been run
+  # through evaluate_vector (see the loop below). Returning, not exiting, is
+  # what lets a compound command naming two merges have BOTH independently
+  # judged: a clean first vector must not prevent the second from being
+  # evaluated at all. `deny()` above still exits the whole hook immediately —
+  # unchanged — the moment ANY vector fails ANY gate.
+  return 0
 }
 
-# ===========================================================================
-# GATE 1 — no ESCALATION marker
-# ===========================================================================
-if [ -f "$ESCALATION" ]; then
-  reason="ESCALATE_HUMAN"
-  detail=$(head -c 800 "$ESCALATION" 2>/dev/null)
-  deny "MERGE GATE ($reason): .quetrex/ESCALATION is present — a bounded self-heal/review loop hit its cap and the pipeline stopped. This merge is BLOCKED until a human resolves the escalation. Surface it to the user and run /quetrex:task-rework; do not delete ESCALATION to force the merge.${detail:+ --- escalation note --- $detail}"
-fi
+# --- evaluate every collected vector; deny() inside exits on the first -----
+# failure. Reaching the end of this loop means every vector this command
+# names passed every gate -- only THEN does the whole hook allow (emit
+# nothing, exit 0).
+vi=0
+vn=${#VECTOR_KINDS[@]}
+while [ "$vi" -lt "$vn" ]; do
+  evaluate_vector "${VECTOR_KINDS[$vi]}" "${VECTOR_SEGS[$vi]}" "${VECTOR_GH_REPO_PREFIXES[$vi]}" "${VECTOR_PENDING_CDS[$vi]}"
+  vi=$((vi + 1))
+done
 
-# ===========================================================================
-# GATE 2 — review verdict must be AUTO_MERGE, for THIS head commit
-# ===========================================================================
-if [ ! -f "$RV" ]; then
-  deny "MERGE GATE (REWORK): .quetrex/review-verdict.json is missing — the review-gate never ran on this branch. Run the pipeline's review-gate (native /review + /security-review) before merging '$merge_kind'."
-fi
-VERDICT=$(jq -r '.verdict // empty' "$RV" 2>/dev/null)
-RV_SHA=$(jq -r '.sha // .head_sha // empty' "$RV" 2>/dev/null)
-
-# The review-gate (agents/reviewer.md) writes EXACTLY one of:
-#   AUTO_MERGE | REWORK | ESCALATE_HUMAN
-# These strings are the contract; they must match here byte-for-byte. Legacy
-# reviewer strings (BLOCK/APPROVE/ESCALATE) are still recognized defensively so
-# an older artifact never silently falls through the catch-all as "AUTO_MERGE".
-case "$VERDICT" in
-  AUTO_MERGE)
-    : ;; # candidate — sha check below still applies
-  REWORK|BLOCK)
-    # BLOCK is the legacy reviewer verdict; treat as REWORK under the new policy.
-    conf=$(jq -rc '(.confirmed // [] | length) as $c | "\($c) confirmed finding(s)"' "$RV" 2>/dev/null)
-    deny "MERGE GATE (REWORK): review verdict is '$VERDICT'${conf:+ ($conf)}, not AUTO_MERGE. Defects were found — this merge is denied. Send the task back through the pipeline (developer → qa → review-gate); it will merge automatically once the verdict is AUTO_MERGE."
-    ;;
-  ESCALATE_HUMAN|ESCALATE)
-    # ESCALATE_HUMAN is the current contract string; ESCALATE is the legacy alias.
-    deny "MERGE GATE (ESCALATE_HUMAN): review verdict is '$VERDICT' — the review-gate was uncertain, hit its rework cap, or referred this to a human. Do NOT auto-merge. Surface the verdict and its findings to the user and let them decide (/quetrex:task-rework)."
-    ;;
-  APPROVE)
-    # Legacy reviewer verdict. Under the NEW merge policy only the review-gate's
-    # explicit AUTO_MERGE authorizes a human-free merge; a bare APPROVE is not
-    # that decision, so escalate rather than auto-ship.
-    deny "MERGE GATE (ESCALATE_HUMAN): review verdict is the legacy 'APPROVE', but the new merge policy authorizes an auto-merge ONLY on an explicit 'AUTO_MERGE' verdict from the review-gate. Run the review-gate to produce a 3-way decision (AUTO_MERGE | REWORK | ESCALATE_HUMAN), or have a human confirm."
-    ;;
-  ""|*)
-    deny "MERGE GATE (ESCALATE_HUMAN): review verdict is '${VERDICT:-<missing>}', which is not a recognized decision (AUTO_MERGE | REWORK | ESCALATE_HUMAN). The review artifact is malformed or partial — do not merge. Surface to the user and re-run the review-gate."
-    ;;
-esac
-
-# Verdict is AUTO_MERGE. Bind it to the exact commit being merged: if new commits
-# landed after review, the verdict no longer describes what would ship.
-if [ -z "$RV_SHA" ]; then
-  deny "MERGE GATE (REWORK): review-verdict.json has verdict AUTO_MERGE but records no commit sha, so it cannot be pinned to what is being merged. Re-run the review-gate so it records the reviewed HEAD sha."
-fi
-if [ -n "$HEAD_SHA" ] && [ "$RV_SHA" != "$HEAD_SHA" ]; then
-  deny "MERGE GATE (REWORK): the AUTO_MERGE verdict is for commit ${RV_SHA:0:12}, but HEAD is now ${HEAD_SHA:0:12} — commits landed after review, so the approval is stale. Re-run the review-gate against the current HEAD before merging."
-fi
-
-# --- GATE 2b — the reviewer may not self-exempt from independent review ------
-# reviewer.md's decision rule 4 mandates ESCALATE_HUMAN when the native /review
-# or /security-review "errored or could not run on a non-trivial change". But
-# the agent that decides the verdict is ALSO the agent that reports whether
-# independent review ran — so that rule is self-graded, and it has already been
-# broken in the wild: a live verdict artifact recorded AUTO_MERGE over 18
-# reviewed files with nativeSecurityReview "not_available_in_env" and
-# nativeReview "not_run_no_pr".
-#
-# Mechanize it here. An AUTO_MERGE is only honored when the artifact
-# AFFIRMATIVELY records that the native security pass actually executed:
-#   "clean"  -> it ran and found nothing
-#   "issues" -> it ran and found something the reviewer then adjudicated
-# WHY THIS NO LONGER DEMANDS THE NATIVE FIELD *ONLY*. Requiring
-# nativeSecurityReview to be "clean"/"issues" made AUTO_MERGE UNREACHABLE, and
-# so made this whole pipeline a manual one. `/security-review` is a
-# SlashCommand, and the reviewer subagent does not have SlashCommand in its
-# runtime tool set — observed repeatedly, the agent reporting "my tool set is
-# Read and Bash only" — even though reviewer.md declares it. The field is
-# therefore STRUCTURALLY unfillable: every verdict recorded
-# "not_available_in_env", every clean pipeline was denied, every merge was done
-# by hand on GitHub, and none of the pipeline's post-merge bookkeeping ever ran
-# (which is also why tasks stranded in in_progress).
-#
-# The requirement this gate actually encodes is INDEPENDENCE: the agent that
-# decided the verdict must not be the only thing asserting security was
-# reviewed. The dedicated security-reviewer AGENT satisfies that on its own —
-# a different agent, fresh context, whose ONLY write is
-# .quetrex/security-findings.json. So independence may now be proven EITHER
-# way, and nothing else:
-#
-#   1. the native pass actually ran            -> nativeSecurityReview clean|issues
-#   2. the independent security-reviewer ran   -> security-findings.json, pinned
-#                                                 to HEAD, zero open Critical
-#   3. no security review was required at all  -> neutral diff AND no plan flag
-#                                                 AND no artifact to contradict
-#
-# Everything else still denies, including a missing field with no artifact, an
-# unpinned or stale artifact, and any open Critical. Omitting a field remains
-# no cheaper than filling it in honestly, and an open Critical is still
-# unbypassable (GATE 4 re-checks it independently of this gate).
-RV_NATIVE_SEC=$(jq -r '(.inputs.nativeSecurityReview // .nativeSecurityReview // empty) | ascii_downcase' "$RV" 2>/dev/null)
-case "$RV_NATIVE_SEC" in
-  clean|issues) : ;;
-  *)
-    SEC_STATE=$(sec_artifact_state)
-    case "$SEC_STATE" in
-      clean)
-        # (2) An independent pass IS on record for this exact commit.
-        : ;;
-      missing)
-        if [ "$NEED_SEC" = "true" ]; then
-          deny "MERGE GATE (REWORK): the verdict is AUTO_MERGE and the native /security-review did not run (inputs.nativeSecurityReview = '${RV_NATIVE_SEC:-<missing>}'), so the independent security-reviewer artifact is the only thing that could back this merge — and .quetrex/security-findings.json does not exist. A security review is required here because $SEC_WHY. Run the security-reviewer agent against the current HEAD, then re-run the review-gate."
-        fi
-        # (3) Not required, nothing sensitive, no artifact to contradict: there
-        #     is no security review to be independent ABOUT. Allow.
-        ;;
-      *)
-        deny "MERGE GATE (ESCALATE_HUMAN): the verdict is AUTO_MERGE and the native /security-review did not run (inputs.nativeSecurityReview = '${RV_NATIVE_SEC:-<missing>}'), so .quetrex/security-findings.json must supply the independent pass — but that artifact is '$SEC_STATE'$([ "$SEC_STATE" = "stale" ] && printf ' (it records a different commit than HEAD %s)' "${HEAD_SHA:0:12}")$([ "$SEC_STATE" = "unpinned" ] && printf ' (it records no head_sha, so it proves nothing about this commit)')$([ "$SEC_STATE" = "critical" ] && printf ' (it has open Critical finding(s) — see GATE 4)'). Re-run the security-reviewer against the current HEAD so a pinned, clean finding set exists, or have a human decide."
-        ;;
-    esac
-    ;;
-esac
-
-# ===========================================================================
-# GATE 3 — verify ledger green AND commit-pinned to HEAD (closes stale-green)
-# ===========================================================================
-# Rule: for EVERY command in the current verify chain, its MOST RECENT ledger
-# entry must (a) have exited 0 AND (b) carry a `sha` equal to the CURRENT HEAD.
-# A chain command that never ran (absent from the ledger), whose latest run was
-# non-zero, OR whose latest green was proven against a DIFFERENT commit than the
-# one being merged, all BLOCK. The sha pin is what makes this immune to a green
-# line written for an earlier commit: if new commits landed after QA proved
-# green, that green no longer describes HEAD and cannot authorize the merge.
-if [ ! -s "$LEDGER" ]; then
-  deny "MERGE GATE (REWORK): .quetrex/verify-ledger.jsonl is missing or empty — QA never proved the verify chain green. Run the pipeline's QA stage before merging."
-fi
-
-# Resolve the current verify chain (single source of truth: verify.json).
-CHAIN_JSON=$(jq -c 'if (.verify | type) == "array" and (.verify | length) > 0 then .verify else empty end' "$QDIR/verify.json" 2>/dev/null)
-
-if [ -n "$CHAIN_JSON" ]; then
-  # For each chain command, its latest ledger entry must be exit 0 AND for HEAD.
-  # null exit = never ran = fail; a sha != HEAD = stale-green = fail.
-  RED=$(jq -sc --argjson chain "$CHAIN_JSON" --arg head "$HEAD_SHA" '
-    (reduce .[] as $e ({}; .[$e.cmd] = {exit:$e.exit, sha:($e.sha // "")})) as $last
-    | [ $chain[]
-        | ($last[.] // {exit:null, sha:null}) as $l
-        | { cmd: ., exit: $l.exit, sha: $l.sha }
-        | select(.exit != 0 or (.sha != $head)) ]
-  ' "$LEDGER" 2>/dev/null)
-else
-  # No canonical chain resolvable — fall back to: every command that appears in
-  # the ledger must have its latest run green AND pinned to HEAD (conservative;
-  # a lingering red or stale-commit command blocks). Still refuses stale-green.
-  RED=$(jq -sc --arg head "$HEAD_SHA" '
-    (reduce .[] as $e ({}; .[$e.cmd] = {exit:$e.exit, sha:($e.sha // "")}))
-    | to_entries
-    | map(select(.value.exit != 0 or (.value.sha != $head)) | {cmd:.key, exit:.value.exit, sha:.value.sha})
-  ' "$LEDGER" 2>/dev/null)
-fi
-
-if [ -z "$RED" ] || [ "$RED" = "null" ]; then
-  # jq failed to evaluate the ledger at the ship boundary -> fail closed.
-  deny "MERGE GATE (ESCALATE_HUMAN): could not evaluate .quetrex/verify-ledger.jsonl (malformed JSONL?). The verify chain cannot be proven green, so the merge is denied. Surface to the user."
-fi
-if [ "$RED" != "[]" ]; then
-  SUMMARY=$(printf '%s' "$RED" | jq -r --arg head "$HEAD_SHA" 'map("  - `\(.cmd)` -> \(if .exit == null then "never ran (no ledger entry)" elif (.exit != 0) then "exit \(.exit)" else "STALE: last green was for commit \((.sha // "?")[0:12]), not HEAD \($head[0:12]) — re-run QA on the current commit" end)") | join("\n")' 2>/dev/null)
-  deny "$(printf 'MERGE GATE (REWORK): the verify chain is not green for the commit being merged. The following command(s) are red, never ran, or stale (proven against a different commit):\n%s\nFix the code and let QA re-prove the chain green (every command exit 0) ON THE CURRENT HEAD before merging.' "$SUMMARY")"
-fi
-
-# ===========================================================================
-# GATE 4 — security findings: no open Critical, pinned to HEAD; required-but-
-#          missing is a failure. NON-BYPASSABLE-BY-OMISSION.
-# ===========================================================================
-# PLAN_SEC, SENSITIVE_DIFF, CHANGED, NEED_SEC and SEC_WHY are all computed in
-# the PREAMBLE above (GATE 2b needs them too). This gate consumes them.
-if [ ! -f "$SEC" ]; then
-  if [ "$NEED_SEC" = "true" ]; then
-    deny "MERGE GATE (REWORK): a security review is required because $SEC_WHY, but .quetrex/security-findings.json is missing — the mandatory security-reviewer stage did not run for this change. Run the security-reviewer against the current HEAD before merging. This requirement cannot be bypassed by omitting the plan flag."
-  fi
-  # Security review not required (neutral diff, no plan flag) and not present -> Gate 4 passes.
-else
-  # security-findings.json exists. Support BOTH the documented object shape
-  # ({head_sha, verdict, findings:[...]}) and a bare array of findings.
-  FINDINGS=$(jq -c 'if type == "object" then (.findings // []) else . end' "$SEC" 2>/dev/null)
-  if [ -z "$FINDINGS" ] || [ "$FINDINGS" = "null" ]; then
-    deny "MERGE GATE (ESCALATE_HUMAN): .quetrex/security-findings.json is malformed and cannot be parsed. The merge is denied until the security findings are readable. Surface to the user."
-  fi
-
-  # Pin to HEAD when the artifact records a head_sha (object shape only).
-  SEC_SHA=$(jq -r 'if type == "object" then (.head_sha // .sha // empty) else empty end' "$SEC" 2>/dev/null)
-  if [ -n "$SEC_SHA" ] && [ -n "$HEAD_SHA" ] && [ "$SEC_SHA" != "$HEAD_SHA" ]; then
-    deny "MERGE GATE (REWORK): the security review is for commit ${SEC_SHA:0:12}, but HEAD is now ${HEAD_SHA:0:12} — the review is stale. Re-run the security-reviewer against the current HEAD before merging."
-  fi
-
-  OPEN_CRIT=$(printf '%s' "$FINDINGS" | jq '[ .[] | select((.severity // "" | ascii_downcase) == "critical" and (.status // "open" | ascii_downcase) == "open") ] | length' 2>/dev/null)
-  case "$OPEN_CRIT" in ''|*[!0-9]*) OPEN_CRIT=-1 ;; esac
-  if [ "$OPEN_CRIT" -lt 0 ]; then
-    deny "MERGE GATE (ESCALATE_HUMAN): could not evaluate open Critical findings in security-findings.json. The merge is denied until the artifact is verifiably clean. Surface to the user."
-  fi
-  if [ "$OPEN_CRIT" -gt 0 ]; then
-    LIST=$(printf '%s' "$FINDINGS" | jq -r '[ .[] | select((.severity // "" | ascii_downcase) == "critical" and (.status // "open" | ascii_downcase) == "open") ] | map("  - \(.category // "?") @ \(.file // "?"):\(.line // "?") — \(.summary // .exploit // "critical finding")") | join("\n")' 2>/dev/null)
-    deny "$(printf 'MERGE GATE (REWORK): %s open Critical security finding(s) block this merge:\n%s\nFix the vulnerabilit(y/ies) and re-run the security-reviewer until zero Critical remain open. Human approval CANNOT bypass an open Critical.' "$OPEN_CRIT" "$LIST")"
-  fi
-fi
-
-# ===========================================================================
-# GATE 5 — every changed file is covered by the architect's ownership map
-# ===========================================================================
-# The whole parallel-developer architecture rests on ONE artifact: the
-# architect's zero-overlap file-ownership map (architect.md calls it "the
-# enforceable contract developers are held to"). Until this gate existed, that
-# contract was enforced by nobody — it appeared exactly once downstream, as
-# prose in reviewer.md asking an LLM to notice. A developer that edited outside
-# its lane produced the classic silent failure: a clean summary, an unexpected
-# file, and every other gate green because none of them look at file paths.
-#
-# This gate looks. It reuses $CHANGED — the same diff GATE 4 already computed
-# against the base branch — and asserts each path is claimed either by an
-# explicit `ownership` key or by some workstream's `owns` glob.
-#
-# NO PLAN -> SKIP, NOT FAIL. Deliberate, and the same shape as GATE 4 directly
-# above: GATE 4 reads the plan for security_review_required and, when no plan
-# exists, does not synthesize a failure — it falls back to a floor derived from
-# the diff itself. Here there is no equivalent floor: with no plan there is no
-# ownership map, and "unowned" is undefined rather than violated. TRIVIAL and
-# SIMPLE routes legitimately run without an architect, so failing closed on a
-# missing plan would deny merges for work that never had lanes to stay in —
-# a liveness break, not a safety win. When a plan DOES exist the gate is strict:
-# a plan carrying no ownership map at all is a malformed artifact and escalates.
-#
-# WHICH plan governs is resolved more strictly here than in GATE 4. GATE 4 can
-# afford `ls | head -n1` because its worst case is requiring a security review
-# that was not strictly needed. GATE 5's worst case is denying a clean merge for
-# violating ANOTHER task's lanes, so it refuses to guess: it uses the plan named
-# by state.json, or the single plan on disk, and escalates when several plans
-# exist and nothing says which one this merge is for.
-PLAN5=""
-if [ -n "$TASK" ] && [ -f "$QDIR/plan/$TASK.json" ]; then
-  PLAN5="$QDIR/plan/$TASK.json"
-else
-  PLAN_COUNT=$(ls -1 "$QDIR"/plan/*.json 2>/dev/null | wc -l | tr -d ' ')
-  case "$PLAN_COUNT" in ''|*[!0-9]*) PLAN_COUNT=0 ;; esac
-  if [ "$PLAN_COUNT" -eq 1 ]; then
-    PLAN5=$(ls -1 "$QDIR"/plan/*.json 2>/dev/null | head -n1)
-  elif [ "$PLAN_COUNT" -gt 1 ]; then
-    deny "MERGE GATE (ESCALATE_HUMAN): .quetrex/plan/ holds $PLAN_COUNT plan artifacts and .quetrex/state.json does not name the task this merge is for${TASK:+ (it names '$TASK', but .quetrex/plan/$TASK.json does not exist)}, so the gate cannot tell which file-ownership map governs this diff. It will not guess — checking the diff against the wrong task's lanes would reject clean work. Repair .quetrex/state.json (or remove the stale plans) and re-run the review-gate."
-  fi
-  # PLAN_COUNT == 0 -> no plan artifact at all -> skip, per the note above.
-fi
-
-if [ -n "$PLAN5" ] && [ -f "$PLAN5" ]; then
-  # Does this plan carry an ownership contract at all?
-  OWN_KEYS=$(jq -r '(.ownership // {}) | keys_unsorted[]?' "$PLAN5" 2>/dev/null)
-  OWN_GLOBS=$(jq -r '(.workstreams // []) | .[]? | (.owns // [])[]?' "$PLAN5" 2>/dev/null)
-
-  if [ -z "$OWN_KEYS" ] && [ -z "$OWN_GLOBS" ]; then
-    deny "MERGE GATE (ESCALATE_HUMAN): the plan artifact $(basename "$PLAN5") exists but declares NO file-ownership map (no .ownership entries and no .workstreams[].owns globs). Ownership is the enforceable contract the parallel-developer pipeline depends on, so a plan without it cannot be checked against the diff. The plan is malformed or partial — do not merge. Surface to the user and re-run the architect."
-  fi
-
-  # Paths that are never owned by a workstream and must not trip the gate:
-  #   .quetrex/**  — the control-plane artifacts this very gate reads. They are
-  #                  written by the pipeline itself (plan, ledger, verdict,
-  #                  state), not by a developer working a lane.
-  #   lockfiles    — regenerated as a side effect of any dependency change, by
-  #                  whichever workstream happened to install. Owning them would
-  #                  force a false overlap between otherwise-disjoint lanes.
-  is_exempt_path() {
-    case "$1" in
-      .quetrex/*) return 0 ;;
-    esac
-    case "$(basename "$1")" in
-      package-lock.json|npm-shrinkwrap.json|yarn.lock|pnpm-lock.yaml|bun.lock|bun.lockb) return 0 ;;
-      Cargo.lock|poetry.lock|uv.lock|Pipfile.lock|Gemfile.lock|composer.lock|go.sum|flake.lock|gradle.lockfile|packages.lock.json) return 0 ;;
-    esac
-    return 1
-  }
-
-  # A path is owned if an `ownership` key matches it exactly, or if it matches
-  # any workstream `owns` glob. Bash pattern matching is used unquoted on the
-  # right of `==` so the glob expands; `**` behaves as `*` here and matches
-  # across `/`, which is the intent for a `src/api/**` style lane.
-  is_owned_path() {
-    local p="$1" k g
-    while IFS= read -r k; do
-      [ -n "$k" ] && [ "$k" = "$p" ] && return 0
-    done <<< "$OWN_KEYS"
-    while IFS= read -r g; do
-      [ -z "$g" ] && continue
-      # shellcheck disable=SC2053
-      [[ "$p" == $g ]] && return 0
-    done <<< "$OWN_GLOBS"
-    return 1
-  }
-
-  UNOWNED=""
-  while IFS= read -r f; do
-    [ -z "$f" ] && continue
-    is_exempt_path "$f" && continue
-    is_owned_path "$f" && continue
-    UNOWNED="${UNOWNED}  - ${f}"$'\n'
-  done <<< "$CHANGED"
-
-  if [ -n "$UNOWNED" ]; then
-    deny "$(printf 'MERGE GATE (REWORK): the diff being merged touches file(s) that NO workstream owns in the architect'"'"'s plan (%s):\n%s\nThe ownership map is the contract that keeps parallel developers from colliding — an edit outside every declared lane is unplanned work that no reviewer signed off on. Send this back through the pipeline: either revert the out-of-lane change, or have the architect re-plan so the file is owned by exactly one workstream, then re-run review. (.quetrex/** and lockfiles are exempt and are not listed here.)' "$(basename "$PLAN5")" "$UNOWNED")"
-  fi
-fi
-
-# ===========================================================================
-# ALL GATES GREEN — allow the merge (no prompt; this IS the auto-merge path).
-# ===========================================================================
-# Emitting no JSON on a PreToolUse hook means "no decision" -> normal permission
-# flow proceeds and the merge runs. Under the new policy an AUTO_MERGE verdict
-# with a green ledger and no open Critical is a clean, human-free ship.
 exit 0

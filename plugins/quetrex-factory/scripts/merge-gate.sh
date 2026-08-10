@@ -353,6 +353,82 @@ ESCALATION="$QDIR/ESCALATION"
 
 HEAD_SHA=$(git -C "$ROOT" rev-parse HEAD 2>/dev/null)
 
+# --- gh pr merge: pin every gate to the PR's HEAD COMMIT, not local HEAD ----
+#
+# THE BUG THIS FIXES (reproduced live 2026-08-07). Every gate below compares
+# its artifact's recorded sha against $HEAD_SHA under the assumption that
+# $HEAD_SHA IS the commit being merged. That holds for `push to main` and
+# `merge into main` — the local checkout literally becomes that commit. It is
+# FALSE for `gh pr merge`: the commit actually being merged is the PR's head
+# commit, but the local checkout is almost always sitting on main (wherever
+# `cd`/`git -C` last left it). A review verdict correctly pinned to the PR's
+# real head (11f84d2) was denied as "stale" solely because it was compared
+# against local main's tip (b7bf116) — nothing was actually stale, and the
+# operator's only escape was to check out the PR head by hand.
+#
+# Resolve the PR's real head commit from the PR itself and, for this vector
+# ONLY, use it as $HEAD_SHA for every gate below (verdict pin, GATE 2b's
+# security-artifact staleness check, the verify-ledger sha pin, and the
+# security-findings sha pin). Non-PR vectors are untouched — local HEAD keeps
+# governing them exactly as before. (The diff-content gates — the sensitive-
+# surface preamble and GATE 5's ownership check — still read $ROOT's local
+# `HEAD` and are unaffected either way; teaching them to diff the PR's actual
+# content would require fetching the PR ref, which is out of scope here.)
+#
+# FAIL CLOSED: if the PR head cannot be resolved (gh missing, PR not found,
+# not authenticated, network hiccup), DENY. An unresolvable PR is a merge
+# that cannot be evaluated, and this gate never lets one through unevaluated.
+if [ "$merge_kind" = "gh pr merge" ]; then
+  # The PR identifier (number or URL) is the first bare (non-flag) token
+  # after "merge"; --repo/-R and the other value-taking flags are skipped so
+  # their values are never mistaken for it. `gh pr merge` with no identifier
+  # at all resolves the PR from the current branch, which `gh pr view` does
+  # too, so an empty PR_ID is passed straight through.
+  PR_REST=$(printf '%s' "$VECTOR_SEG" | sed -E 's/^gh[[:space:]]+pr[[:space:]]+merge[[:space:]]*//')
+  PR_VALUE_FLAGS=" -R --repo --body --body-file --subject --match-head-commit "
+  PR_ID=""
+  pr_skip_next=0
+  # shellcheck disable=SC2086
+  set -- $PR_REST
+  for tok in "$@"; do
+    if [ "$pr_skip_next" -eq 1 ]; then pr_skip_next=0; continue; fi
+    case "$tok" in
+      -*)
+        case "$tok" in
+          *=*) : ;;
+          *)
+            for vf in $PR_VALUE_FLAGS; do
+              [ "$tok" = "$vf" ] && { pr_skip_next=1; break; }
+            done
+            ;;
+        esac
+        ;;
+      *)
+        PR_ID="$tok"; break ;;
+    esac
+  done
+
+  if [ -n "${GH_REPO:-}" ]; then
+    if [ -n "$PR_ID" ]; then
+      PR_HEAD_SHA=$(cd "$ROOT" 2>/dev/null && gh pr view "$PR_ID" --repo "$GH_REPO" --json headRefOid --jq .headRefOid 2>/dev/null)
+    else
+      PR_HEAD_SHA=$(cd "$ROOT" 2>/dev/null && gh pr view --repo "$GH_REPO" --json headRefOid --jq .headRefOid 2>/dev/null)
+    fi
+  else
+    if [ -n "$PR_ID" ]; then
+      PR_HEAD_SHA=$(cd "$ROOT" 2>/dev/null && gh pr view "$PR_ID" --json headRefOid --jq .headRefOid 2>/dev/null)
+    else
+      PR_HEAD_SHA=$(cd "$ROOT" 2>/dev/null && gh pr view --json headRefOid --jq .headRefOid 2>/dev/null)
+    fi
+  fi
+  PR_HEAD_SHA=$(printf '%s' "${PR_HEAD_SHA:-}" | tr -d '[:space:]')
+
+  if [ -z "$PR_HEAD_SHA" ] || ! [[ "$PR_HEAD_SHA" =~ ^[0-9a-f]{7,40}$ ]]; then
+    deny "MERGE GATE (ESCALATE_HUMAN): could not resolve the PR's head commit (\`gh pr view${PR_ID:+ $PR_ID}${GH_REPO:+ --repo $GH_REPO} --json headRefOid\` failed or returned nothing). A merge must never be evaluated against the wrong commit, or left unevaluated — check that 'gh' is installed and authenticated and that the PR exists, then retry."
+  fi
+  HEAD_SHA="$PR_HEAD_SHA"
+fi
+
 # ===========================================================================
 # PREAMBLE — is a security review REQUIRED for this diff, and what does the
 #            independent security artifact say?

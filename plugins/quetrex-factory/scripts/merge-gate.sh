@@ -337,11 +337,15 @@ fi
 # say nothing about that one. Judging it by these artifacts is precisely the
 # cross-repo leak fixed above, so refuse to judge it at all — and refuse
 # LOUDLY rather than allowing, because it IS a merge and the gate must never
-# wave one through unevaluated. Matches BOTH forms: missing `-R` here would
-# let `gh pr merge -R owner/repo 7` bypass this refusal entirely, and this
-# gate would then evaluate a foreign repo's merge against ITS OWN artifacts —
-# a live cross-repo authorization leak, not just a missed detection.
-if [ "$merge_kind" = "gh pr merge" ] && [[ "$VECTOR_SEG" =~ (--repo[[:space:]=]|-R[[:space:]])([^[:space:]]+) ]]; then
+# wave one through unevaluated. `-R` (verified against real `gh` 2.97.0)
+# accepts THREE shapes, not just the spaced one: `-R owner/repo`,
+# `-Rowner/repo` (attached, no separator), and `-R=owner/repo`. A regex
+# requiring whitespace after `-R` catches only the first and lets the other
+# two straight through — GH_REPO never gets set, the refusal never fires,
+# and `gh pr merge -Rother-org/other-repo 7` gets evaluated (and authorized)
+# against THIS repo's own artifacts while it merges into a different one.
+# `-R[[:space:]=]?` makes the separator optional to close both gaps.
+if [ "$merge_kind" = "gh pr merge" ] && [[ "$VECTOR_SEG" =~ (--repo[[:space:]=]|-R[[:space:]=]?)([^[:space:]]+) ]]; then
   GH_REPO=$(printf '%s' "${BASH_REMATCH[2]}" | sed 's/^["'\'']*//; s/["'\'']*$//' | tr 'A-Z' 'a-z')
   ORIGIN_SLUG=$(git -C "$ROOT" remote get-url origin 2>/dev/null \
     | sed -e 's#\.git$##' -e 's#.*[:/]\([^/][^/]*/[^/][^/]*\)$#\1#' | tr 'A-Z' 'a-z')

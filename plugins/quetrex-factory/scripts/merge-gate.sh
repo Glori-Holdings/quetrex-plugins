@@ -332,13 +332,17 @@ if ! command -v jq >/dev/null 2>&1; then
 fi
 
 # --- a --repo pointing somewhere else is not this repo's merge to judge -----
-# `gh pr merge --repo owner/name` can target a repository that is not the one
-# resolved above, and this repo's artifacts say nothing about that one. Judging
-# it by these artifacts is precisely the cross-repo leak fixed above, so refuse
-# to judge it at all — and refuse LOUDLY rather than allowing, because it IS a
-# merge and the gate must never wave one through unevaluated.
-if [ "$merge_kind" = "gh pr merge" ] && [[ "$VECTOR_SEG" =~ --repo[[:space:]=]+([^[:space:]]+) ]]; then
-  GH_REPO=$(printf '%s' "${BASH_REMATCH[1]}" | sed 's/^["'\'']*//; s/["'\'']*$//' | tr 'A-Z' 'a-z')
+# `gh pr merge --repo owner/name` (or its short form `-R`) can target a
+# repository that is not the one resolved above, and this repo's artifacts
+# say nothing about that one. Judging it by these artifacts is precisely the
+# cross-repo leak fixed above, so refuse to judge it at all — and refuse
+# LOUDLY rather than allowing, because it IS a merge and the gate must never
+# wave one through unevaluated. Matches BOTH forms: missing `-R` here would
+# let `gh pr merge -R owner/repo 7` bypass this refusal entirely, and this
+# gate would then evaluate a foreign repo's merge against ITS OWN artifacts —
+# a live cross-repo authorization leak, not just a missed detection.
+if [ "$merge_kind" = "gh pr merge" ] && [[ "$VECTOR_SEG" =~ (--repo[[:space:]=]|-R[[:space:]])([^[:space:]]+) ]]; then
+  GH_REPO=$(printf '%s' "${BASH_REMATCH[2]}" | sed 's/^["'\'']*//; s/["'\'']*$//' | tr 'A-Z' 'a-z')
   ORIGIN_SLUG=$(git -C "$ROOT" remote get-url origin 2>/dev/null \
     | sed -e 's#\.git$##' -e 's#.*[:/]\([^/][^/]*/[^/][^/]*\)$#\1#' | tr 'A-Z' 'a-z')
   if [ -n "$ORIGIN_SLUG" ] && [ -n "$GH_REPO" ] && [ "$GH_REPO" != "$ORIGIN_SLUG" ]; then
@@ -377,9 +381,19 @@ HEAD_SHA=$(git -C "$ROOT" rev-parse HEAD 2>/dev/null)
 # untouched — local HEAD keeps governing them exactly as before, because for
 # THEM local HEAD genuinely is the commit being shipped.
 #
-# FAIL CLOSED: if the PR head cannot be resolved (gh missing, PR not found,
-# not authenticated, network hiccup), DENY. An unresolvable PR is a merge
-# that cannot be evaluated, and this gate never lets one through unevaluated.
+# The BASE end of that diff matters just as much as the head end, and gets
+# the SAME treatment: also resolved from the PR (its baseRefOid — the base
+# branch's CURRENT tip on GitHub), not from $ROOT's local `main`/`master`
+# ref. A checkout that is behind origin is the routine case, not an edge
+# case — the cloud cuts the PR branch off current main while the laptop
+# hasn't pulled — and diffing against a stale local base OVER-reports: files
+# another team already merged to main show up as "changed by this PR" and
+# get denied as unowned, or scanned for sensitivity, when they were never
+# part of it.
+#
+# FAIL CLOSED: if either ref cannot be resolved or fetched (gh missing, PR
+# not found, not authenticated, network hiccup), DENY. A merge that cannot
+# be evaluated against its real content is never let through unevaluated.
 if [ "$merge_kind" = "gh pr merge" ]; then
   # The PR identifier (number or URL) is the first bare (non-flag) token
   # after "merge"; every value-taking flag `gh pr merge` accepts (short AND
@@ -413,39 +427,60 @@ if [ "$merge_kind" = "gh pr merge" ]; then
     esac
   done
 
+  # One call, both refs — headRefOid AND baseRefOid — parsed locally with jq
+  # rather than gh's own --jq, so a single captured payload answers both.
   if [ -n "${GH_REPO:-}" ]; then
     if [ -n "$PR_ID" ]; then
-      PR_HEAD_SHA=$(cd "$ROOT" 2>/dev/null && gh pr view "$PR_ID" --repo "$GH_REPO" --json headRefOid --jq .headRefOid 2>/dev/null)
+      PR_VIEW_JSON=$(cd "$ROOT" 2>/dev/null && gh pr view "$PR_ID" --repo "$GH_REPO" --json headRefOid,baseRefOid 2>/dev/null)
     else
-      PR_HEAD_SHA=$(cd "$ROOT" 2>/dev/null && gh pr view --repo "$GH_REPO" --json headRefOid --jq .headRefOid 2>/dev/null)
+      PR_VIEW_JSON=$(cd "$ROOT" 2>/dev/null && gh pr view --repo "$GH_REPO" --json headRefOid,baseRefOid 2>/dev/null)
     fi
   else
     if [ -n "$PR_ID" ]; then
-      PR_HEAD_SHA=$(cd "$ROOT" 2>/dev/null && gh pr view "$PR_ID" --json headRefOid --jq .headRefOid 2>/dev/null)
+      PR_VIEW_JSON=$(cd "$ROOT" 2>/dev/null && gh pr view "$PR_ID" --json headRefOid,baseRefOid 2>/dev/null)
     else
-      PR_HEAD_SHA=$(cd "$ROOT" 2>/dev/null && gh pr view --json headRefOid --jq .headRefOid 2>/dev/null)
+      PR_VIEW_JSON=$(cd "$ROOT" 2>/dev/null && gh pr view --json headRefOid,baseRefOid 2>/dev/null)
     fi
   fi
-  PR_HEAD_SHA=$(printf '%s' "${PR_HEAD_SHA:-}" | tr -d '[:space:]')
+  PR_HEAD_SHA=$(printf '%s' "${PR_VIEW_JSON:-}" | jq -r '.headRefOid // empty' 2>/dev/null)
+  PR_BASE_SHA=$(printf '%s' "${PR_VIEW_JSON:-}" | jq -r '.baseRefOid // empty' 2>/dev/null)
 
   if [ -z "$PR_HEAD_SHA" ] || ! [[ "$PR_HEAD_SHA" =~ ^[0-9a-f]{7,40}$ ]]; then
-    deny "MERGE GATE (ESCALATE_HUMAN): could not resolve the PR's head commit (\`gh pr view${PR_ID:+ $PR_ID}${GH_REPO:+ --repo $GH_REPO} --json headRefOid\` failed or returned nothing). A merge must never be evaluated against the wrong commit, or left unevaluated — check that 'gh' is installed and authenticated and that the PR exists, then retry."
+    deny "MERGE GATE (ESCALATE_HUMAN): could not resolve the PR's head commit (\`gh pr view${PR_ID:+ $PR_ID}${GH_REPO:+ --repo $GH_REPO} --json headRefOid,baseRefOid\` failed or returned nothing usable). A merge must never be evaluated against the wrong commit, or left unevaluated — check that 'gh' is installed and authenticated and that the PR exists, then retry."
+  fi
+  if [ -z "$PR_BASE_SHA" ] || ! [[ "$PR_BASE_SHA" =~ ^[0-9a-f]{7,40}$ ]]; then
+    deny "MERGE GATE (ESCALATE_HUMAN): resolved the PR's head commit but not its base (\`gh pr view${PR_ID:+ $PR_ID}${GH_REPO:+ --repo $GH_REPO} --json headRefOid,baseRefOid\` returned no usable baseRefOid). Without the PR's real base, the diff-based gates cannot tell what THIS PR changed versus what was already on main — do not guess by falling back to local HEAD."
   fi
   HEAD_SHA="$PR_HEAD_SHA"
+  DIFF_BASE="$PR_BASE_SHA"
 
-  # The diff-content gates below need the PR head's ACTUAL commit object, not
-  # just its sha string. The primary checkout may never have fetched the PR
-  # branch (it was pushed from a worktree, or built entirely in the cloud), in
-  # which case `git diff ...$HEAD_SHA` would silently fail and read as "no
-  # changes" — the exact hole that let a sensitive diff merge unreviewed and
-  # denied a clean one for a file it never touched. Fetch it if missing.
-  # FAIL CLOSED: an uninspectable diff must never be treated as clean, or its
-  # ownership as violated, by omission — deny rather than evaluate blind.
-  if ! git -C "$ROOT" cat-file -e "${PR_HEAD_SHA}^{commit}" 2>/dev/null; then
-    if ! git -C "$ROOT" fetch --no-tags -q origin "$PR_HEAD_SHA" 2>/dev/null; then
-      deny "MERGE GATE (ESCALATE_HUMAN): resolved the PR's head commit (${PR_HEAD_SHA:0:12}) but could not fetch it into this checkout ('git fetch origin ${PR_HEAD_SHA:0:12}' failed) — the diff-based gates (sensitive-surface detection, file-ownership) cannot inspect what is actually being merged without it, and evaluating them against local HEAD instead would silently describe the wrong commit. Fetch the PR branch into this checkout (e.g. 'git fetch origin pull/<n>/head') and retry."
+  # The diff-content gates below need the ACTUAL commit objects for both ends
+  # of the range, not just their sha strings. The primary checkout may never
+  # have fetched the PR branch (pushed from a worktree, or built entirely in
+  # the cloud) — or may simply be BEHIND origin/main, which is the routine
+  # case, not an edge case. Either way, `git diff` against a missing object
+  # silently reads as "no changes", and diffing against a stale local base
+  # over-reports files someone else already merged. Fetch whatever is
+  # missing. FAIL CLOSED: an uninspectable diff must never be treated as
+  # clean, or its ownership as violated, by omission — deny rather than
+  # evaluate blind.
+  #
+  # The existence check runs BOTH before AND after the fetch: `git fetch`
+  # exiting 0 is not, by itself, proof the object is now present (a wrapper,
+  # a partial fetch, or an oddly-configured remote could exit clean without
+  # it) — cat-file is what's actually trusted, both times.
+  ensure_commit_fetched() {  # ensure_commit_fetched <sha> <label> -> denies on failure
+    local sha="$1" label="$2"
+    git -C "$ROOT" cat-file -e "${sha}^{commit}" 2>/dev/null && return 0
+    if ! git -C "$ROOT" fetch --no-tags -q origin "$sha" 2>/dev/null; then
+      deny "MERGE GATE (ESCALATE_HUMAN): resolved the PR's $label commit (${sha:0:12}) but could not fetch it into this checkout ('git fetch origin ${sha:0:12}' failed) — the diff-based gates (sensitive-surface detection, file-ownership) cannot inspect what is actually being merged without it, and evaluating them against local HEAD instead would silently describe the wrong commit. Fetch the PR branch into this checkout (e.g. 'git fetch origin pull/<n>/head') and retry."
     fi
-  fi
+    if ! git -C "$ROOT" cat-file -e "${sha}^{commit}" 2>/dev/null; then
+      deny "MERGE GATE (ESCALATE_HUMAN): 'git fetch origin ${sha:0:12}' exited 0 but the $label commit (${sha:0:12}) still is not present in this checkout — refusing to trust the fetch's exit code alone. Fetch the PR branch into this checkout manually and retry."
+    fi
+  }
+  ensure_commit_fetched "$PR_HEAD_SHA" "head"
+  ensure_commit_fetched "$PR_BASE_SHA" "base"
 fi
 
 # ===========================================================================
@@ -477,16 +512,22 @@ PLAN_SEC="false"
 
 # --- (b) inspect the real diff for a sensitive surface ---------------------
 # Diff the commit actually being merged ($HEAD_SHA — the PR's head for a
-# `gh pr merge`, local HEAD for everything else; see above) against the base
-# branch (main, else master). Three-dot range = what that commit changed
-# since it diverged from base. Deliberately NOT the literal ref `HEAD`: for a
-# `gh pr merge` the local checkout is not on that commit at all.
-BASE_BRANCH="main"
-if ! git -C "$ROOT" rev-parse --verify --quiet main >/dev/null 2>&1; then
-  git -C "$ROOT" rev-parse --verify --quiet master >/dev/null 2>&1 && BASE_BRANCH="master"
+# `gh pr merge`, local HEAD for everything else; see above) against its real
+# base ($DIFF_BASE — the PR's own baseRefOid for a `gh pr merge`, resolved
+# above; local main/master for everything else). Three-dot range = what
+# $HEAD_SHA changed since it diverged from $DIFF_BASE. Deliberately NOT the
+# literal refs `HEAD`/`main`: for a `gh pr merge`, the local checkout is not
+# on the head commit, and local `main` can be BEHIND the PR's actual base —
+# diffing against a stale local base over-reports files someone else already
+# merged as "changed by this PR" (see the resolution block above).
+if [ -z "${DIFF_BASE:-}" ]; then
+  DIFF_BASE="main"
+  if ! git -C "$ROOT" rev-parse --verify --quiet main >/dev/null 2>&1; then
+    git -C "$ROOT" rev-parse --verify --quiet master >/dev/null 2>&1 && DIFF_BASE="master"
+  fi
 fi
 SENSITIVE_DIFF=0
-CHANGED=$(git -C "$ROOT" diff --name-only "$BASE_BRANCH"..."$HEAD_SHA" 2>/dev/null)
+CHANGED=$(git -C "$ROOT" diff --name-only "$DIFF_BASE"..."$HEAD_SHA" 2>/dev/null)
 # Fall back to the last commit's files if the base range can't be computed.
 [ -z "$CHANGED" ] && CHANGED=$(git -C "$ROOT" diff --name-only "$HEAD_SHA"~1.."$HEAD_SHA" 2>/dev/null)
 SENSITIVE_PATH_RE='(auth|authz|authn|login|logout|signin|sign-in|session|oauth|openid|saml|sso|jwt|token|secret|credential|password|passwd|crypto|encrypt|decrypt|cipher|migration|migrate|schema|\.sql$|payment|billing|invoice|checkout|charge|stripe|paypal|permission|role|rbac|tenant|acl|middleware|guard|policy|webhook|\.github/workflows/|dockerfile|docker-compose|terraform|pulumi|kubernetes|k8s|helm)'
@@ -497,7 +538,7 @@ fi
 # (data-access by client id, whole-body binding, injection sinks, env/secret use,
 # external calls). Only added (+) lines to avoid flagging deletions.
 if [ "$SENSITIVE_DIFF" -eq 0 ]; then
-  ADDED=$(git -C "$ROOT" diff "$BASE_BRANCH"..."$HEAD_SHA" 2>/dev/null | grep -E '^\+' | grep -vE '^\+\+\+')
+  ADDED=$(git -C "$ROOT" diff "$DIFF_BASE"..."$HEAD_SHA" 2>/dev/null | grep -E '^\+' | grep -vE '^\+\+\+')
   [ -z "$ADDED" ] && ADDED=$(git -C "$ROOT" diff "$HEAD_SHA"~1.."$HEAD_SHA" 2>/dev/null | grep -E '^\+' | grep -vE '^\+\+\+')
   SENSITIVE_CODE_RE='(findById|find_by_id|findOne|req\.(params|query|body)|request\.(args|form|json|params)|Object\.assign|dangerouslySetInnerHTML|innerHTML|v-html|child_process|execSync|spawnSync|[^a-zA-Z]eval\(|process\.env|os\.environ|getenv|jwt\.|bcrypt|scrypt|argon2|createHash|createCipher|\.raw\(|\$where|authorize\(|authenticate|passport|fetch\(|axios|http\.request|urllib|requests\.(get|post))'
   if [ -n "$ADDED" ] && printf '%s' "$ADDED" | grep -qE "$SENSITIVE_CODE_RE"; then

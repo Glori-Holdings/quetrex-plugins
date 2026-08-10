@@ -119,16 +119,62 @@ fi
 # require the invocation to BEGIN its segment. The token `main` inside another
 # sub-command's flags or a commit message can no longer trigger the gate.
 #
-# KNOWN RESIDUAL — this comment used to also claim a heredoc line was covered
-# by the same fix. That claim is FALSE and is corrected here rather than left
-# to mislead the next reader: $SEGMENTS below is walked ONE LINE AT A TIME
-# (`while IFS= read -r seg`), and a bare newline is exactly as much a segment
-# separator as `&&`/`;`/`|` are. A heredoc BODY line that happens to start
-# with a merge token — e.g. a commit-message heredoc containing a line that
-# reads "gh pr merge ..." — is still evaluated as its own vector and can still
-# cry wolf. Fixing this needs the segment splitter to understand a heredoc
-# body as opaque data rather than more shell syntax, which is separate,
-# real work; it is recorded as a known residual (PR body), not fixed here.
+# ============================================================================
+# THE BOUNDARY OF WHAT THIS HOOK CAN GUARANTEE — read before extending it.
+# ============================================================================
+# This hook parses a COMMAND STRING. It does not execute a shell, does not
+# track variable state across separate tool calls, and cannot see anything
+# that happens outside the text it was handed. Every round of hardening this
+# file has been through — segment splitting, quote-aware tokenizing, pflag-
+# accurate flag parsing — has been about closing gaps WITHIN that boundary:
+# making the hook's understanding of a command's own text match what a real
+# shell/gh would do with that same text. None of it moves the boundary
+# itself. Concretely:
+#
+# COVERED (this hook DOES catch these, and is tested against them): ordinary
+# and accidental cross-repo/cross-commit merges — a `--repo`/`-R` flag in any
+# form gh accepts (separated, attached, `=`-joined, clustered), a repeated
+# flag (last wins), an inherited `GH_REPO` already in this process's own
+# environment, a `GH_REPO=` assignment inline on the SAME command (`GH_REPO=x
+# gh pr merge`, `env GH_REPO=x gh pr merge`), a PR identifier given as a URL,
+# and a backslash-continued command split across physical lines.
+#
+# NOT COVERED, by design, and no amount of further pattern-matching fixes
+# this — it needs either server-side enforcement (branch protection; tracked
+# separately) or literally executing the shell to know the answer, which a
+# PreToolUse hook that runs BEFORE execution structurally cannot do:
+#   - `export GH_REPO=x; gh pr merge ...` as ONE command whose earlier
+#     segment sets the variable this command then relies on. Bounded in
+#     principle (same command string), but this hook does not track
+#     arbitrary variable assignments across segments — seeing a `GH_REPO=`
+#     prefix ON THE MERGE SEGMENT ITSELF is covered (above); an `export` in
+#     an EARLIER segment of the same line is not.
+#   - A shell FUNCTION, a sourced `.env`, direnv, or `gh`'s own persisted
+#     config (`gh config set`, `~/.config/gh/hosts.yml`) changing what a
+#     bare `gh pr merge` resolves to. None of these appear in the command
+#     text at all.
+#   - `export GH_REPO=x` in an EARLIER, SEPARATE tool call, then `gh pr
+#     merge` in a LATER one. This hook only ever sees one command at a time
+#     — no memory of prior calls. (In practice this is PARTIALLY covered as
+#     a side effect: if the session's shell persists environment between
+#     tool calls, that earlier export is often still exported when the later
+#     command's hook invocation runs, and the "inherited env" check above
+#     catches it then — but that is incidental, not a guarantee this hook
+#     makes.)
+#   - A vector deliberately obfuscated to defeat text matching — git
+#     plumbing, a wrapper script, a library binding, base64/eval tricks.
+#
+# A command-string parser answers "does this LOOK like an ordinary or
+# accidental cross-repo/cross-commit merge" — it cannot answer "is there ANY
+# way, considering the full state of this shell session and every file it
+# could read, that this command ends up targeting a different repo or
+# commit than it appears to." Treat this hook as a strong guard against
+# operator mistakes and routine pipeline commands, not as a security
+# boundary against a determined, capable adversary who controls the shell
+# session — that boundary belongs server-side (GitHub branch protection),
+# where it cannot be talked around by clever command construction, and
+# where enforcement does not depend on parsing text correctly at all.
+# ============================================================================
 #
 # Residual, and deliberately so: a vector constructed to hide from a regex
 # (git plumbing, a script file, a library binding) is not detected. This gate
@@ -136,14 +182,145 @@ fi
 # is not a sandbox, and pretending otherwise is what produced the false
 # positives in the first place.
 
-# Split on && || ; and |. awk, not sed: BSD sed does not interpret \n in a
-# replacement, so `sed 's/&&/\n/'` yields a literal "n" on macOS.
-SEGMENTS=$(printf '%s' "$COMMAND" | awk '{gsub(/&&|\|\||;|\|/, "\n"); print}')
+# --- join backslash-newline continuations BEFORE any splitting -------------
+# A real shell removes a `\` immediately followed by a newline entirely (no
+# extra separation introduced) before it does anything else with the input.
+# Without this, a command split across physical lines —
+#
+#     gh pr merge 7 \
+#       --repo other-org/other-repo --squash
+#
+# — had its SECOND line treated as an unrelated, separately-read segment
+# (the line-by-line SEGMENTS walk below has always split on a bare newline
+# too — see the boundary note above). The `--repo` flag and everything after
+# it was never even reached by the parser: the gate evaluated a naked
+# `gh pr merge 7`, found no cross-repo signal because there genuinely was
+# none in what it looked at, and authorized a merge into a different repo.
+# `sed -e :a -e '/\\$/N; s/\\\n//; ta'` is the portable (GNU- and BSD-sed)
+# idiom for this join: `\n` on the PATTERN side of `s///` is a literal
+# newline on both, unlike `\n` on the REPLACEMENT side (BSD sed emits a
+# literal "n" there — the reason the segment-splitter below never used sed
+# for its own substitution either).
+COMMAND=$(printf '%s' "$COMMAND" | sed -e :a -e '/\\$/N; s/\\\n//; ta')
+
+# --- split on && || ; and | -- OUTSIDE quotes and comments only ------------
+#
+# THE DEFECT THIS REPLACES. The previous splitter was a quote-BLIND
+# `awk gsub(/&&|\|\||;|\|/, "\n")` over the raw command string. A value that
+# happens to contain one of those substrings inside quotes —
+#
+#     gh pr merge 7 --squash -t 'build && test'
+#
+# — got split MID-QUOTE, corrupting a legitimate command into a truncated,
+# unparseable one purely because of what a commit-message-style flag's VALUE
+# said. Reusing a second, independently-written quoting implementation here
+# was explicitly rejected: this file already has ONE character-by-character
+# quote-tracking state machine (tokenize_argv, defined below, used to parse
+# gh's own argv) and a second one for segment-splitting is exactly the kind
+# of duplicated logic that drifts out of sync with the first — which is how
+# this file accumulated five rounds of "one more spelling of the same hole."
+# split_segments_quote_aware below is a SIBLING state machine with THE SAME
+# quoting rules (single quotes: no escapes; double quotes: backslash escapes
+# `"\$`\`` only) applied to a different job (finding operator boundaries
+# instead of finding word boundaries) — kept in that shape, not literally
+# shared code, because a bash function call per character would cost real
+# time for two different consumers; if the quoting RULES ever change, both
+# functions must change together, and this comment is the reminder.
+split_segments_quote_aware() {
+  # Two `local` statements, same reason as tokenize_argv below: word
+  # expansion for the WHOLE `local` command happens before the builtin
+  # runs, against the enclosing scope's state -- `n=${#s}` on the same
+  # line as `s="$1"` would see `s` as unset under `set -u`.
+  local s="$1"
+  local i=0 n=${#s} c two out='' in_sq=0 in_dq=0 in_cm=0 prev
+  while [ "$i" -lt "$n" ]; do
+    c="${s:$i:1}"
+    if [ "$in_cm" -eq 1 ]; then
+      out+="$c"
+      [ "$c" = $'\n' ] && in_cm=0
+    elif [ "$in_sq" -eq 1 ]; then
+      out+="$c"
+      [ "$c" = "'" ] && in_sq=0
+    elif [ "$in_dq" -eq 1 ]; then
+      out+="$c"
+      if [ "$c" = '\' ] && [ $((i + 1)) -lt "$n" ]; then
+        i=$((i + 1)); out+="${s:$i:1}"
+      elif [ "$c" = '"' ]; then
+        in_dq=0
+      fi
+    else
+      case "$c" in
+        "'") in_sq=1; out+="$c" ;;
+        '"') in_dq=1; out+="$c" ;;
+        '#')
+          # A `#` starts a shell comment only at the START of a word
+          # (preceded by whitespace/start-of-string, outside quotes) — so
+          # `foo#bar` is NOT a comment, matching real shell syntax. A
+          # comment's operator-looking characters must not cause a split.
+          prev="${out: -1}"
+          if [ -z "$out" ] || [ "$prev" = ' ' ] || [ "$prev" = $'\t' ] || [ "$prev" = $'\n' ]; then
+            in_cm=1
+          fi
+          out+="$c"
+          ;;
+        '\')
+          if [ $((i + 1)) -lt "$n" ]; then
+            out+="$c"; i=$((i + 1)); out+="${s:$i:1}"
+          else
+            out+="$c"
+          fi
+          ;;
+        '&' | '|')
+          two="${s:$i:2}"
+          if [ "$two" = "&&" ] || [ "$two" = "||" ]; then
+            out+=$'\n'
+            i=$((i + 1))
+          else
+            out+=$'\n'
+          fi
+          ;;
+        ';')
+          out+=$'\n'
+          ;;
+        *)
+          out+="$c"
+          ;;
+      esac
+    fi
+    i=$((i + 1))
+  done
+  printf '%s' "$out"
+}
+
+SEGMENTS=$(split_segments_quote_aware "$COMMAND")
 
 # Strip leading wrappers so `sudo git push …`, `FOO=1 git push …` and
 # `bash -c "git push …"` still anchor on the real invocation.
+# normalize_segment <segment> -- sets NORM_RESULT to the segment with
+# leading wrappers/assignments stripped, and NORM_GH_REPO_PREFIX to any
+# `GH_REPO=` assignment found along the way (see below). Deliberately a
+# global-variable-output function, NOT `printf` + command substitution: an
+# earlier version returned via stdout and was called as `norm=$(normalize_
+# segment "$seg")`, and `$(...)` always forks a SUBSHELL — any variable this
+# function set (NORM_GH_REPO_PREFIX included) was set in that subshell's own
+# copy of the environment and vanished the instant the subshell exited,
+# never reaching the caller. The bug was silent: bash only complained (an
+# "unbound variable" under `set -u`) at the call site that later tried to
+# read the never-propagated value, far from where it was actually lost.
 normalize_segment() {
   local s="$1" first
+  # A leading `GH_REPO=value` (or `env GH_REPO=value`) is stripped below like
+  # any other wrapper/assignment prefix — but gh itself reads GH_REPO from
+  # the environment when no --repo/-R flag is present, so silently discarding
+  # it here would mean `GH_REPO=other-org/other-repo gh pr merge 7` and
+  # `env GH_REPO=other-org/other-repo gh pr merge 7` carry a real repo
+  # selector that this hook then never sees. Capture it (last one wins, same
+  # as gh's own last-assignment-wins semantics) into NORM_GH_REPO_PREFIX so
+  # the caller can fold it into the cross-repo signal set. Reset per call —
+  # only the assignments IN THIS SEGMENT are in scope; see the boundary note
+  # above `normalize_segment`'s call site for what is deliberately NOT (an
+  # `export GH_REPO=x;` on an EARLIER, separate segment of the same line).
+  NORM_GH_REPO_PREFIX=""
   s=$(printf '%s' "$s" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
   while [ -n "$s" ]; do
     first="${s%%[[:space:]]*}"
@@ -164,6 +341,9 @@ normalize_segment() {
         # the first space there would drop the `git` and silently un-detect a
         # real vector.
         if [[ "$first" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; then
+          case "$first" in
+            GH_REPO=*) NORM_GH_REPO_PREFIX="${first#GH_REPO=}" ;;
+          esac
           s="${s#"$first"}"
         else
           break
@@ -171,7 +351,7 @@ normalize_segment() {
     esac
     s=$(printf '%s' "$s" | sed 's/^[[:space:]]*//')
   done
-  printf '%s' "$s"
+  NORM_RESULT="$s"
 }
 
 # Tag pushes (deploy/version rollback tags) are exempt — they are not merges.
@@ -197,11 +377,13 @@ GIT_ANCHOR='^git([[:space:]]+-C[[:space:]]+[^[:space:]]+)?([[:space:]]+-[^[:spac
 is_merge_vector=0
 merge_kind=""
 VECTOR_SEG=""
+VECTOR_GH_REPO_PREFIX=""
 PENDING_CD=""
 
 while IFS= read -r seg; do
   [ -z "$seg" ] && continue
-  norm=$(normalize_segment "$seg")
+  normalize_segment "$seg"
+  norm="$NORM_RESULT"
   [ -z "$norm" ] && continue
 
   # Track `cd <dir>` so a later `git merge` in the same compound command is
@@ -213,7 +395,9 @@ while IFS= read -r seg; do
 
   # (a) gh pr merge — the primary vector under the new policy.
   if [[ "$norm" =~ ^gh[[:space:]]+pr[[:space:]]+merge([[:space:]]|$) ]]; then
-    is_merge_vector=1; merge_kind="gh pr merge"; VECTOR_SEG="$norm"; break
+    is_merge_vector=1; merge_kind="gh pr merge"; VECTOR_SEG="$norm"
+    VECTOR_GH_REPO_PREFIX="$NORM_GH_REPO_PREFIX"
+    break
   fi
 
   # (b) git push whose OWN arguments target master/main (a push straight to the
@@ -404,6 +588,18 @@ tokenize_argv() {
           ;;
         "'") in_sq=1; have=1 ;;
         '"') in_dq=1; have=1 ;;
+        '#')
+          # A `#` at the START of a word (not mid-token, outside quotes) is
+          # a shell comment — everything after it on this segment is inert.
+          # Without this, a trailing `# ... --repo evil/repo` comment reads
+          # as a real flag: the same over-match class as finding 3, just in
+          # the tokenizer instead of the segment splitter. `foo#bar` (no
+          # preceding space) is NOT a comment, matching real shell syntax.
+          if [ "$have" -eq 0 ]; then
+            break
+          fi
+          token+="$c"; have=1
+          ;;
         '\')
           if [ $((i + 1)) -lt "$n" ]; then
             token+="${s:$((i + 1)):1}"
@@ -436,6 +632,21 @@ gh_merge_long_kind() {  # -> prints value|bool|unknown
     author-email | body | body-file | subject | match-head-commit | repo) printf 'value' ;;
     admin | auto | delete-branch | disable-auto | merge | rebase | squash | help) printf 'bool' ;;
     *) printf 'unknown' ;;
+  esac
+}
+
+# looks_like_shell_expr <value> -- true if VALUE still looks like a shell
+# variable reference or command substitution ($SLUG, ${SLUG}, $(...), a
+# backtick expression) rather than a literal string. A real repo slug never
+# legitimately contains "$" or a backtick; seeing one means this text was
+# captured from the command's SOURCE before a shell would have expanded it
+# — which a PreToolUse hook, running before execution, always sees. See the
+# boundary note near the top of this file and the comment at this
+# function's call site for why that's handled as UNKNOWN, not fail-closed.
+looks_like_shell_expr() {
+  case "$1" in
+    *'$'* | *'`'*) return 0 ;;
+    *) return 1 ;;
   esac
 }
 
@@ -562,13 +773,49 @@ if [ "$merge_kind" = "gh pr merge" ]; then
   # itself set --repo" — the classic collision. If this fires on a
   # same-repo merge unexpectedly, `unset GH_REPO` in the shell and retry.
   ENV_REPO=$(printf '%s' "${GH_REPO:-}" | tr 'A-Z' 'a-z')
-  FLAG_REPO=$(printf '%s' "$PARSED_REPO" | sed 's/^["'\'']*//; s/["'\'']*$//' | tr 'A-Z' 'a-z')
+
+  # An inline/env-wrapped `GH_REPO=` assignment ON THIS SAME SEGMENT
+  # (`GH_REPO=x gh pr merge`, `env GH_REPO=x gh pr merge`) is a signal too
+  # — captured by normalize_segment above into VECTOR_GH_REPO_PREFIX rather
+  # than silently discarded along with the rest of the prefix. An `export
+  # GH_REPO=x;` on an EARLIER, separate segment of the same line is NOT
+  # covered here — see the boundary note near the top of this file for why.
+  PREFIX_REPO_RAW=$(printf '%s' "$VECTOR_GH_REPO_PREFIX" | sed 's/^["'\'']*//; s/["'\'']*$//')
+  FLAG_REPO_RAW=$(printf '%s' "$PARSED_REPO" | sed 's/^["'\'']*//; s/["'\'']*$//')
+
+  # An unexpanded shell variable/command-substitution in the repo VALUE
+  # position ($SLUG, ${SLUG}, $(...), `...`) is treated as UNKNOWN — not as
+  # a literal repo name to compare — and dropped from the signal set (fail
+  # OPEN, for this signal only). This hook parses TEXT; it does not execute
+  # a shell and cannot know what $SLUG will resolve to. FAIL-CLOSED here was
+  # considered and rejected: this exact shape is what this engine's OWN
+  # `/quetrex:merge` command emits (`gh pr merge "$PR_NUM" --repo "$SLUG"
+  # ...`, with SLUG computed from the local repo's own origin earlier in
+  # the same script) — denying on an unresolvable expression would deny
+  # that command for the SAME reason every time, breaking the pipeline's
+  # own merge step outright. The residual risk is bounded: a value set via
+  # a mechanism this hook DOES track (an inherited/inline GH_REPO, above)
+  # is still caught by THAT signal independently of what this flag's own
+  # value says; a value set via a mechanism this hook does not track at
+  # all (a shell function, a sourced file) is already out of bounds
+  # regardless — see the boundary note — and fail-closed here would not
+  # close that gap, only break the common, legitimate case.
+  if looks_like_shell_expr "$FLAG_REPO_RAW"; then
+    FLAG_REPO=""
+  else
+    FLAG_REPO=$(printf '%s' "$FLAG_REPO_RAW" | tr 'A-Z' 'a-z')
+  fi
+  if looks_like_shell_expr "$PREFIX_REPO_RAW"; then
+    PREFIX_REPO=""
+  else
+    PREFIX_REPO=$(printf '%s' "$PREFIX_REPO_RAW" | tr 'A-Z' 'a-z')
+  fi
 
   # Collect DISTINCT non-empty repo signals. More than one, disagreeing, is
   # ambiguous — refuse to guess which one gh will actually honor rather
   # than picking one and being wrong.
   SIGNAL_SET=""
-  for sig in "$FLAG_REPO" "$URL_REPO" "$ENV_REPO"; do
+  for sig in "$FLAG_REPO" "$PREFIX_REPO" "$URL_REPO" "$ENV_REPO"; do
     [ -z "$sig" ] && continue
     case " $SIGNAL_SET " in
       *" $sig "*) : ;;
@@ -580,7 +827,7 @@ if [ "$merge_kind" = "gh pr merge" ]; then
   [ -n "$SIGNAL_SET" ] && SIGNAL_COUNT=$(printf '%s\n' "$SIGNAL_SET" | wc -w | tr -d ' ')
 
   if [ "$SIGNAL_COUNT" -gt 1 ]; then
-    deny "MERGE GATE (ESCALATE_HUMAN): this command's repository selectors disagree — flag/PR-URL/environment GH_REPO name different repos ($SIGNAL_SET). This gate will not guess which one 'gh' will actually honor; a wrong guess here means authorizing a merge in a repo these artifacts say nothing about."
+    deny "MERGE GATE (ESCALATE_HUMAN): this command's repository selectors disagree — flag/prefix-assignment/PR-URL/environment GH_REPO name different repos ($SIGNAL_SET). This gate will not guess which one 'gh' will actually honor; a wrong guess here means authorizing a merge in a repo these artifacts say nothing about."
   elif [ "$SIGNAL_COUNT" -eq 1 ]; then
     EFFECTIVE_REPO="$SIGNAL_SET"
     ORIGIN_SLUG=$(git -C "$ROOT" remote get-url origin 2>/dev/null \

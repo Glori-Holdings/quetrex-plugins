@@ -599,6 +599,24 @@ done <<< "$SEGMENTS"
 evaluate_vector() {
   local merge_kind="$1" VECTOR_SEG="$2" VECTOR_GH_REPO_PREFIX="$3" PENDING_CD="$4"
 
+  # THE LEAK THIS CLOSES. DIFF_BASE is assigned ONLY inside the `gh pr
+  # merge` branch below (`DIFF_BASE="$PR_BASE_SHA"`), then read via
+  # `if [ -z "${DIFF_BASE:-}" ]; then DIFF_BASE="main"; ... fi` — a
+  # fallback-if-unset pattern that means a NON-gh-pr-merge vector (push to
+  # main, merge into main) never assigns it at all THIS call, so it falls
+  # through to whatever a PRIOR vector in the SAME compound command left it
+  # as. Two clean-looking vectors targeting DIFFERENT repos, evaluated back
+  # to back by the loop below, meant the second one's diff-content gates
+  # (sensitive-surface detection, GATE 5 ownership) silently diffed against
+  # a base commit from the FIRST repo — an object `git diff` can't find in
+  # the second, so it reads as "no changes", and both gates pass by
+  # omission on a diff they never actually inspected. Every OTHER variable
+  # this function touches was audited for the same shape (see the round's
+  # commit message for the full list of what was checked and why each one
+  # is safe) — DIFF_BASE was the only one read via an unset-fallback
+  # pattern rather than being unconditionally reassigned on every call.
+  DIFF_BASE=""
+
   # --- resolve the repo THIS COMMAND TARGETS (worktree-safe) ------------------
   #
   # THE SECOND DEFECT THIS REPLACES: resolution used to start from
@@ -632,6 +650,16 @@ evaluate_vector() {
   # Only quetrex-managed repos are gated. No .quetrex/ -> not our concern, allow.
   { [ -n "$ROOT" ] && [ -d "$QDIR" ]; } || return 0
 
+  # A human-readable identity for THIS vector's repo, computed once here so
+  # every deny() call below (via the prefix deny() adds — see next) names
+  # which repo it's actually about. Origin's owner/repo slug when a remote
+  # is configured (the common case, and the same extraction other gates
+  # already use), falling back to the absolute checkout path otherwise —
+  # still unique, just less pretty.
+  VECTOR_ORIGIN_SLUG=$(git -C "$ROOT" remote get-url origin 2>/dev/null \
+    | sed -e 's#\.git$##' -e 's#.*[:/]\([^/][^/]*/[^/][^/]*\)$#\1#')
+  VECTOR_LABEL="${VECTOR_ORIGIN_SLUG:-$ROOT}"
+
   # --- deny helper (correct PreToolUse schema; exit 0) -----------------------
   # With jq: the documented permissionDecision:"deny" object on exit 0.
   #
@@ -646,8 +674,20 @@ evaluate_vector() {
   # the other blocking channel the hook contract provides instead: exit 2 is a
   # blocking error whose stderr is fed back to the agent. It blocks the tool call
   # outright and there is no JSON to malform.
+  #
+  # EVERY deny() reason is prefixed with `[$VECTOR_LABEL]` HERE, once, rather
+  # than edited into each of GATE 1-5's ~20 individual call sites. Without
+  # it, a compound command naming two repos denied on whichever gate failed
+  # in the SECOND one read identically to a same-repo denial — "the verify
+  # chain is not green... `true` -> exit 1" says nothing about WHICH repo,
+  # and an operator standing in the clean FIRST repo (whose own ledger says
+  # exit 0) would be sent to debug a problem that isn't there. The cross-
+  # repo refusal already named both slugs explicitly; this gives every
+  # other gate the same property for free, and automatically covers any
+  # deny() call added later too.
   deny() {
     local reason="$1"
+    reason="[$VECTOR_LABEL] $reason"
     if command -v jq >/dev/null 2>&1; then
       jq -cn --arg r "$reason" \
         '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"deny",permissionDecisionReason:$r}}'

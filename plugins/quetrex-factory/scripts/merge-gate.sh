@@ -612,9 +612,21 @@ evaluate_vector() {
   # the second, so it reads as "no changes", and both gates pass by
   # omission on a diff they never actually inspected. Every OTHER variable
   # this function touches was audited for the same shape (see the round's
-  # commit message for the full list of what was checked and why each one
-  # is safe) — DIFF_BASE was the only one read via an unset-fallback
-  # pattern rather than being unconditionally reassigned on every call.
+  # commit message for the full list). Correcting that audit, not
+  # retracting it: DIFF_BASE was NOT the only ${VAR:-} read in this
+  # function — grep finds several more, including VECTOR_LABEL's own
+  # ${VECTOR_ORIGIN_SLUG:-$ROOT} 43 lines below. Every one of them is
+  # safe, but because an unconditional assignment PRECEDES the read on
+  # the same call, not because the ${VAR:-} shape itself is absent —
+  # finding a ${VAR:-} pattern here is not by itself proof of a leak;
+  # check for a preceding assignment first. Likewise, ADDED/FINDINGS/
+  # SEC_SHA/OPEN_CRIT are each computed inside the single conditional arm
+  # that consumes them (arm-scoped, never read outside it), not via an
+  # "unconditional command substitution ... even when the result is
+  # empty" as the commit message filed them — safe for that reason
+  # instead. DIFF_BASE was the one place a ${VAR:-} read had NO
+  # assignment, conditional or unconditional, preceding it on a
+  # non-gh-pr-merge call; that absence, not the syntax, was the bug.
   DIFF_BASE=""
 
   # --- resolve the repo THIS COMMAND TARGETS (worktree-safe) ------------------
@@ -656,8 +668,12 @@ evaluate_vector() {
   # is configured (the common case, and the same extraction other gates
   # already use), falling back to the absolute checkout path otherwise —
   # still unique, just less pretty.
+  # Lowercased to match ORIGIN_SLUG (computed later, same extraction, also
+  # lowercased) — otherwise the cross-repo refusal prints the same slug
+  # twice in two different casings: deny()'s own [$VECTOR_LABEL] prefix
+  # next to ORIGIN_SLUG quoted verbatim in the message body.
   VECTOR_ORIGIN_SLUG=$(git -C "$ROOT" remote get-url origin 2>/dev/null \
-    | sed -e 's#\.git$##' -e 's#.*[:/]\([^/][^/]*/[^/][^/]*\)$#\1#')
+    | sed -e 's#\.git$##' -e 's#.*[:/]\([^/][^/]*/[^/][^/]*\)$#\1#' | tr 'A-Z' 'a-z')
   VECTOR_LABEL="${VECTOR_ORIGIN_SLUG:-$ROOT}"
 
   # --- deny helper (correct PreToolUse schema; exit 0) -----------------------

@@ -1239,6 +1239,82 @@ evaluate_vector() {
     NEED_SEC="true"; SEC_WHY="the diff touches a sensitive surface (auth/authz/input/secrets/crypto/external-call/data-access/migration)"
   fi
 
+  # --- artifact_only_range_ok — the self-invalidation escape hatch ----------
+  #
+  # THE TRAP: every sha-pin this gate trusts (review-verdict.json's .sha,
+  # security-findings.json's .head_sha, each verify-ledger.jsonl entry's
+  # .sha) is an artifact NAMING the commit it approves. By design these are
+  # runtime control-plane files and git-workflow.md instructs every stage to
+  # NEVER commit them (.gitignore should ignore .quetrex/* and un-ignore
+  # only project.json/verify.json). But when a repo's gitignore drifts from
+  # that — observed in the wild — one of these DOES get committed. The
+  # commit that adds it moves HEAD to a new sha; the artifact's own pin,
+  # recorded before that commit existed, can now NEVER equal HEAD again. A
+  # straight sha-equality check then denies every subsequent operation
+  # forever, including the commit that would remove the artifact and repair
+  # the mistake — the gate blocks its own repair.
+  #
+  # THE FIX IS NARROW ON PURPOSE: an old pin still authorizes the current
+  # HEAD ONLY when nothing that could have invalidated the approval
+  # happened since — i.e. $old is an ancestor of (or equal to) $new, AND
+  # every commit in $old..$new touches NOTHING outside .quetrex/. A single
+  # commit that touches so much as one file outside .quetrex/ anywhere in
+  # that range disqualifies the WHOLE range: code changed, so the old
+  # approval no longer describes what would ship, and the ordinary
+  # stale-verdict/stale-ledger/stale-findings deny applies exactly as
+  # before. This property must never weaken — it is the entire point of
+  # the sha pin.
+  #
+  # FAIL-CLOSED on every unresolved condition: a missing commit object
+  # (shallow clone, a sha this checkout never fetched), a merge-base
+  # error, or a diff-tree that can't be read all `return 1` (not-ok)
+  # rather than assume safety. Never let an error path open the gate.
+  #
+  # Correctness details that matter:
+  #   - Path scope uses an ANCHORED case-glob (`.quetrex/*`), not a string
+  #     prefix test, so `.quetrexfoo/x` and `src/.quetrex/x` do NOT count
+  #     as in-scope — only the literal top-level `.quetrex/` directory
+  #     does.
+  #   - Merge commits are diffed with `-m` (one diff per parent) so a
+  #     change that would otherwise vanish from a plain no-flags
+  #     merge-commit diff (git only shows nothing for a merge by default)
+  #     cannot hide a disqualifying path.
+  #   - `--no-renames` so a rename is seen as its literal old+new paths
+  #     rather than compressed to a single "new name only" line, which
+  #     could hide a source path outside .quetrex/ that a rename moved OUT
+  #     of scope.
+  #   - `--root` so a range that happens to start at the repo's very first
+  #     commit is still diffed correctly.
+  artifact_only_range_ok() {
+    local old="$1" new="$2"
+    [ -n "$old" ] && [ -n "$new" ] || return 1
+    [ "$old" = "$new" ] && return 0
+
+    git -C "$ROOT" rev-parse --verify --quiet "${old}^{commit}" >/dev/null 2>&1 || return 1
+    git -C "$ROOT" rev-parse --verify --quiet "${new}^{commit}" >/dev/null 2>&1 || return 1
+
+    git -C "$ROOT" merge-base --is-ancestor "$old" "$new" >/dev/null 2>&1 || return 1
+
+    local commits commit paths p
+    commits=$(git -C "$ROOT" rev-list "${old}..${new}" 2>/dev/null) || return 1
+    [ -n "$commits" ] || return 1
+
+    while IFS= read -r commit; do
+      [ -z "$commit" ] && continue
+      paths=$(git -C "$ROOT" diff-tree --no-commit-id --name-only -r -m --root --no-renames "$commit" 2>/dev/null)
+      [ $? -eq 0 ] || return 1
+      while IFS= read -r p; do
+        [ -z "$p" ] && continue
+        case "$p" in
+          .quetrex/*) : ;;
+          *) return 1 ;;
+        esac
+      done <<< "$paths"
+    done <<< "$commits"
+
+    return 0
+  }
+
   # sec_artifact_state — what the INDEPENDENT security-reviewer artifact proves
   # about the exact commit being merged. Echoes exactly one of:
   #   missing | malformed | unpinned | stale | critical | clean
@@ -1252,7 +1328,7 @@ evaluate_vector() {
     if [ -z "$findings" ] || [ "$findings" = "null" ]; then printf 'malformed'; return; fi
     sha=$(jq -r 'if type == "object" then (.head_sha // .sha // empty) else empty end' "$SEC" 2>/dev/null)
     if [ -z "$sha" ]; then printf 'unpinned'; return; fi
-    if [ -n "$HEAD_SHA" ] && [ "$sha" != "$HEAD_SHA" ]; then printf 'stale'; return; fi
+    if [ -n "$HEAD_SHA" ] && [ "$sha" != "$HEAD_SHA" ] && ! artifact_only_range_ok "$sha" "$HEAD_SHA"; then printf 'stale'; return; fi
     crit=$(printf '%s' "$findings" | jq '[ .[] | select((.severity // "" | ascii_downcase) == "critical" and (.status // "open" | ascii_downcase) == "open") ] | length' 2>/dev/null)
     case "$crit" in ''|*[!0-9]*) printf 'malformed'; return ;; esac
     if [ "$crit" -gt 0 ]; then printf 'critical'; return; fi
@@ -1310,9 +1386,13 @@ evaluate_vector() {
   if [ -z "$RV_SHA" ]; then
     deny "MERGE GATE (REWORK): review-verdict.json has verdict AUTO_MERGE but records no commit sha, so it cannot be pinned to what is being merged. Re-run the review-gate so it records the reviewed HEAD sha."
   fi
-  if [ -n "$HEAD_SHA" ] && [ "$RV_SHA" != "$HEAD_SHA" ]; then
+  if [ -n "$HEAD_SHA" ] && [ "$RV_SHA" != "$HEAD_SHA" ] && ! artifact_only_range_ok "$RV_SHA" "$HEAD_SHA"; then
     deny "MERGE GATE (REWORK): the AUTO_MERGE verdict is for commit ${RV_SHA:0:12}, but HEAD is now ${HEAD_SHA:0:12} — commits landed after review, so the approval is stale. Re-run the review-gate against the current HEAD before merging."
   fi
+  # else: either RV_SHA already equals HEAD, or every commit since RV_SHA
+  # only touched .quetrex/ (e.g. committing review-verdict.json itself moved
+  # HEAD without changing any reviewed code) — the verdict still describes
+  # what would actually ship, so it stands.
 
   # --- GATE 2b — the reviewer may not self-exempt from independent review ------
   # reviewer.md's decision rule 4 mandates ESCALATE_HUMAN when the native /review
@@ -1420,6 +1500,33 @@ evaluate_vector() {
     # jq failed to evaluate the ledger at the ship boundary -> fail closed.
     deny "MERGE GATE (ESCALATE_HUMAN): could not evaluate .quetrex/verify-ledger.jsonl (malformed JSONL?). The verify chain cannot be proven green, so the merge is denied. Surface to the user."
   fi
+
+  # A candidate above is flagged red for exiting non-zero, never running, OR
+  # carrying a sha that isn't HEAD. That last case is only GENUINELY stale
+  # when code actually changed since that green run: if the ledger itself is
+  # what got committed (moving HEAD) and nothing outside .quetrex/ changed
+  # since, the green proof still describes the code being merged. Re-check
+  # each sha-only mismatch against artifact_only_range_ok before treating it
+  # as red — a non-zero exit or a never-ran (null/empty sha) command is
+  # never rescued by this and always stays red.
+  if [ "$RED" != "[]" ]; then
+    STILL_RED="[]"
+    while IFS= read -r entry; do
+      [ -z "$entry" ] && continue
+      e_exit=$(printf '%s' "$entry" | jq -r '.exit')
+      e_sha=$(printf '%s' "$entry" | jq -r '.sha // empty')
+      genuinely_red=1
+      if [ "$e_exit" = "0" ] && [ -n "$e_sha" ] && [ -n "$HEAD_SHA" ] && artifact_only_range_ok "$e_sha" "$HEAD_SHA"; then
+        genuinely_red=0
+      fi
+      if [ "$genuinely_red" -eq 1 ]; then
+        STILL_RED=$(printf '%s' "$STILL_RED" | jq -c --argjson e "$entry" '. + [$e]' 2>/dev/null)
+        [ -n "$STILL_RED" ] || STILL_RED="[]"
+      fi
+    done < <(printf '%s' "$RED" | jq -c '.[]' 2>/dev/null)
+    RED="$STILL_RED"
+  fi
+
   if [ "$RED" != "[]" ]; then
     SUMMARY=$(printf '%s' "$RED" | jq -r --arg head "$HEAD_SHA" 'map("  - `\(.cmd)` -> \(if .exit == null then "never ran (no ledger entry)" elif (.exit != 0) then "exit \(.exit)" else "STALE: last green was for commit \((.sha // "?")[0:12]), not HEAD \($head[0:12]) — re-run QA on the current commit" end)") | join("\n")' 2>/dev/null)
     deny "$(printf 'MERGE GATE (REWORK): the verify chain is not green for the commit being merged. The following command(s) are red, never ran, or stale (proven against a different commit):\n%s\nFix the code and let QA re-prove the chain green (every command exit 0) ON THE CURRENT HEAD before merging.' "$SUMMARY")"
@@ -1446,7 +1553,7 @@ evaluate_vector() {
 
     # Pin to HEAD when the artifact records a head_sha (object shape only).
     SEC_SHA=$(jq -r 'if type == "object" then (.head_sha // .sha // empty) else empty end' "$SEC" 2>/dev/null)
-    if [ -n "$SEC_SHA" ] && [ -n "$HEAD_SHA" ] && [ "$SEC_SHA" != "$HEAD_SHA" ]; then
+    if [ -n "$SEC_SHA" ] && [ -n "$HEAD_SHA" ] && [ "$SEC_SHA" != "$HEAD_SHA" ] && ! artifact_only_range_ok "$SEC_SHA" "$HEAD_SHA"; then
       deny "MERGE GATE (REWORK): the security review is for commit ${SEC_SHA:0:12}, but HEAD is now ${HEAD_SHA:0:12} — the review is stale. Re-run the security-reviewer against the current HEAD before merging."
     fi
 

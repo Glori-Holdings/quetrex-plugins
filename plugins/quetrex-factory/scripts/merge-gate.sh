@@ -117,8 +117,18 @@ fi
 #
 # Now: split the command on shell operators, normalize away wrappers, and
 # require the invocation to BEGIN its segment. The token `main` inside another
-# sub-command's flags, a commit message, a PR body, or a heredoc line can no
-# longer trigger the gate — while every genuine vector still does.
+# sub-command's flags or a commit message can no longer trigger the gate.
+#
+# KNOWN RESIDUAL — this comment used to also claim a heredoc line was covered
+# by the same fix. That claim is FALSE and is corrected here rather than left
+# to mislead the next reader: $SEGMENTS below is walked ONE LINE AT A TIME
+# (`while IFS= read -r seg`), and a bare newline is exactly as much a segment
+# separator as `&&`/`;`/`|` are. A heredoc BODY line that happens to start
+# with a merge token — e.g. a commit-message heredoc containing a line that
+# reads "gh pr merge ..." — is still evaluated as its own vector and can still
+# cry wolf. Fixing this needs the segment splitter to understand a heredoc
+# body as opaque data rather than more shell syntax, which is separate,
+# real work; it is recorded as a known residual (PR body), not fixed here.
 #
 # Residual, and deliberately so: a vector constructed to hide from a regex
 # (git plumbing, a script file, a library binding) is not detected. This gate
@@ -331,26 +341,253 @@ if ! command -v jq >/dev/null 2>&1; then
   deny "MERGE GATE (ESCALATE_HUMAN): jq is not installed, so the merge gate cannot verify the review verdict, verify ledger, or security findings for '$merge_kind'. A merge must never proceed unevaluated. Install jq, then re-run the pipeline's review-gate."
 fi
 
-# --- a --repo pointing somewhere else is not this repo's merge to judge -----
-# `gh pr merge --repo owner/name` (or its short form `-R`) can target a
-# repository that is not the one resolved above, and this repo's artifacts
-# say nothing about that one. Judging it by these artifacts is precisely the
-# cross-repo leak fixed above, so refuse to judge it at all — and refuse
-# LOUDLY rather than allowing, because it IS a merge and the gate must never
-# wave one through unevaluated. `-R` (verified against real `gh` 2.97.0)
-# accepts THREE shapes, not just the spaced one: `-R owner/repo`,
-# `-Rowner/repo` (attached, no separator), and `-R=owner/repo`. A regex
-# requiring whitespace after `-R` catches only the first and lets the other
-# two straight through — GH_REPO never gets set, the refusal never fires,
-# and `gh pr merge -Rother-org/other-repo 7` gets evaluated (and authorized)
-# against THIS repo's own artifacts while it merges into a different one.
-# `-R[[:space:]=]?` makes the separator optional to close both gaps.
-if [ "$merge_kind" = "gh pr merge" ] && [[ "$VECTOR_SEG" =~ (--repo[[:space:]=]|-R[[:space:]=]?)([^[:space:]]+) ]]; then
-  GH_REPO=$(printf '%s' "${BASH_REMATCH[2]}" | sed 's/^["'\'']*//; s/["'\'']*$//' | tr 'A-Z' 'a-z')
-  ORIGIN_SLUG=$(git -C "$ROOT" remote get-url origin 2>/dev/null \
-    | sed -e 's#\.git$##' -e 's#.*[:/]\([^/][^/]*/[^/][^/]*\)$#\1#' | tr 'A-Z' 'a-z')
-  if [ -n "$ORIGIN_SLUG" ] && [ -n "$GH_REPO" ] && [ "$GH_REPO" != "$ORIGIN_SLUG" ]; then
-    deny "MERGE GATE (ESCALATE_HUMAN): this command merges a PR in '$GH_REPO', but it is running against a checkout of '$ORIGIN_SLUG'. The gate artifacts here (review verdict, verify ledger, security findings) describe '$ORIGIN_SLUG' and say NOTHING about '$GH_REPO', so it cannot evaluate this merge — and it will not judge one repo by another repo's verdict. Run the merge from inside a checkout of '$GH_REPO' so that repo's own gates apply."
+# --- gh pr merge argv: TOKENIZE and WALK it like gh's own flag parser ------
+#
+# THE DEFECT THIS REPLACES (five review rounds, five new spellings of the
+# same hole). Every previous version of this section matched a REGEX against
+# the whole command-segment STRING to find a --repo/-R flag. gh's flag
+# parser is pflag (Go), which is not regular: it understands separated
+# (`-R x`), attached (`-Rx`), `=`-joined (`-R=x`), and CLUSTERED short flags
+# (`-dRx` is --delete-branch + --repo, `-sdRx` is --squash + --delete-branch
+# + --repo), and for a repeated flag the LAST occurrence wins. A regex
+# anchored on a literal `-R` cannot represent "-R preceded by other short
+# flags packed into the same token," cannot represent "take the LAST match,
+# not the first" (bash's `=~` is leftmost-only), and — because it scans the
+# whole string rather than discrete tokens — cannot avoid matching "-R"
+# INSIDE the quoted VALUE of an unrelated flag (`-t 'chore: post-Review
+# cleanup'` regexed as if `-Review` were `--repo`). Every one of these was
+# found, independently, by adversarial review against the real `gh` binary.
+#
+# The fix is architectural, not another pattern: TOKENIZE the segment the way
+# a shell would (quote-aware, no `eval` — see tokenize_argv), then WALK the
+# tokens the way pflag does: left to right, tracking clusters, `=`,
+# attachment, and last-wins. FAIL CLOSED on anything that doesn't match a
+# KNOWN gh-pr-merge flag shape — an unrecognized flag, an unterminated
+# quote, or an ambiguous PR-identifier form denies the WHOLE merge rather
+# than guessing which value gh will actually use. A wrong guess here is not
+# a missed detection; it is authorizing a merge in a repo (or against a
+# commit) these artifacts say nothing about.
+
+# tokenize_argv <string> -- sets TOKENS[] (bash array) and
+# TOKENIZE_UNTERMINATED (1 if a quote was never closed). No eval: a
+# character-by-character state machine, so a $(...)/backtick inside the
+# inspected command string is read as inert text, never executed.
+tokenize_argv() {
+  # Split into two `local` statements deliberately: word expansion for an
+  # ENTIRE `local` command happens before the builtin runs, all in the
+  # enclosing scope's variable state — so `n=${#s}` on the SAME line as
+  # `s="$1"` would expand against whatever `s` was BEFORE this declaration
+  # (unset, under `set -u` an error) rather than the value just assigned.
+  local s="$1"
+  local i=0 n=${#s} c token='' in_sq=0 in_dq=0 have=0 nc
+  TOKENS=()
+  TOKENIZE_UNTERMINATED=0
+  while [ "$i" -lt "$n" ]; do
+    c="${s:$i:1}"
+    if [ "$in_sq" -eq 1 ]; then
+      if [ "$c" = "'" ]; then in_sq=0; else token+="$c"; fi
+    elif [ "$in_dq" -eq 1 ]; then
+      if [ "$c" = '"' ]; then in_dq=0
+      elif [ "$c" = '\' ] && [ $((i + 1)) -lt "$n" ]; then
+        nc="${s:$((i + 1)):1}"
+        case "$nc" in
+          '"' | '\' | '$' | '`') token+="$nc"; i=$((i + 1)) ;;
+          *) token+="$c" ;;
+        esac
+      else
+        token+="$c"
+      fi
+    else
+      case "$c" in
+        ' ' | $'\t')
+          [ "$have" -eq 1 ] && { TOKENS+=("$token"); token=''; have=0; }
+          ;;
+        "'") in_sq=1; have=1 ;;
+        '"') in_dq=1; have=1 ;;
+        '\')
+          if [ $((i + 1)) -lt "$n" ]; then
+            token+="${s:$((i + 1)):1}"
+            i=$((i + 1))
+            have=1
+          fi
+          ;;
+        *) token+="$c"; have=1 ;;
+      esac
+    fi
+    i=$((i + 1))
+  done
+  [ "$have" -eq 1 ] && TOKENS+=("$token")
+  { [ "$in_sq" -eq 1 ] || [ "$in_dq" -eq 1 ]; } && TOKENIZE_UNTERMINATED=1
+}
+
+# gh pr merge's flags, classified value/bool/unknown. `case`, not an
+# associative array: this file targets plain bash (macOS ships bash 3.2 as
+# /usr/bin/bash, no associative arrays), matching the style already used for
+# PR_VALUE_FLAGS elsewhere.
+gh_merge_short_kind() {  # -> prints value|bool|unknown
+  case "$1" in
+    A | b | F | t | R) printf 'value' ;;
+    d | m | r | s) printf 'bool' ;;
+    *) printf 'unknown' ;;
+  esac
+}
+gh_merge_long_kind() {  # -> prints value|bool|unknown
+  case "$1" in
+    author-email | body | body-file | subject | match-head-commit | repo) printf 'value' ;;
+    admin | auto | delete-branch | disable-auto | merge | rebase | squash | help) printf 'bool' ;;
+    *) printf 'unknown' ;;
+  esac
+}
+
+# parse_gh_pr_merge <segment> -- tokenizes and walks a `gh pr merge ...`
+# segment the way pflag would. Sets:
+#   PARSE_OK        1 if every token was classified with confidence
+#   PARSED_PR_ID    the PR identifier (number/URL/branch), or empty
+#   PARSED_REPO     the repo the LAST -R/--repo occurrence named (repeated
+#                   flags: last wins, matching real gh), or empty
+parse_gh_pr_merge() {
+  local seg="$1" i n tok kind name val rest letter after_dd=0
+  PARSE_OK=1
+  PARSED_PR_ID=""
+  PARSED_REPO=""
+
+  tokenize_argv "$seg"
+  if [ "$TOKENIZE_UNTERMINATED" -eq 1 ]; then
+    PARSE_OK=0
+    return
+  fi
+
+  n=${#TOKENS[@]}
+  # First 3 tokens are the already-matched "gh pr merge" prefix.
+  if [ "$n" -lt 3 ]; then PARSE_OK=0; return; fi
+  i=3
+  while [ "$i" -lt "$n" ]; do
+    tok="${TOKENS[$i]}"
+    if [ "$after_dd" -eq 1 ]; then
+      [ -z "$PARSED_PR_ID" ] && PARSED_PR_ID="$tok"
+      i=$((i + 1)); continue
+    fi
+    case "$tok" in
+      --)
+        after_dd=1 ;;
+      --*)
+        name="${tok#--}"
+        val=""
+        case "$name" in
+          *=*) val="${name#*=}"; name="${name%%=*}" ;;
+        esac
+        kind=$(gh_merge_long_kind "$name")
+        case "$kind" in
+          unknown) PARSE_OK=0; return ;;
+          bool)
+            [ -n "$val" ] && { PARSE_OK=0; return; }
+            ;;
+          value)
+            if [ -z "$val" ] && [[ "$tok" != *=* ]]; then
+              i=$((i + 1))
+              [ "$i" -ge "$n" ] && { PARSE_OK=0; return; }
+              val="${TOKENS[$i]}"
+            fi
+            [ "$name" = "repo" ] && PARSED_REPO="$val"
+            ;;
+        esac
+        ;;
+      -?*)
+        rest="${tok#-}"
+        while [ -n "$rest" ]; do
+          letter="${rest:0:1}"
+          rest="${rest:1}"
+          kind=$(gh_merge_short_kind "$letter")
+          case "$kind" in
+            unknown) PARSE_OK=0; return ;;
+            bool) : ;;
+            value)
+              val="${rest#=}"
+              if [ -z "$val" ]; then
+                i=$((i + 1))
+                [ "$i" -ge "$n" ] && { PARSE_OK=0; return; }
+                val="${TOKENS[$i]}"
+              fi
+              [ "$letter" = "R" ] && PARSED_REPO="$val"
+              rest=""
+              ;;
+          esac
+        done
+        ;;
+      *)
+        [ -z "$PARSED_PR_ID" ] && PARSED_PR_ID="$tok"
+        ;;
+    esac
+    i=$((i + 1))
+  done
+}
+
+# --- resolve the PR identifier and any repo selector, ONCE ------------------
+# Both the cross-repo refusal below and the later PR-head/base resolution
+# reuse PARSED_PR_ID / EFFECTIVE_REPO — a single parse, not two independent
+# passes that could (and, historically, did) disagree.
+PARSED_PR_ID=""
+EFFECTIVE_REPO=""
+if [ "$merge_kind" = "gh pr merge" ]; then
+  parse_gh_pr_merge "$VECTOR_SEG"
+  if [ "$PARSE_OK" -ne 1 ]; then
+    deny "MERGE GATE (ESCALATE_HUMAN): could not confidently parse this 'gh pr merge' invocation — an unrecognized flag, an unterminated quote, or an unrecognized PR-identifier URL. A merge must never be evaluated by guessing what its arguments mean. Simplify the command, or run it after confirming the target repo and commit by hand."
+  fi
+
+  # A PR URL names a repo too — gh resolves the PR (and the repo) straight
+  # from it. A token containing "://" that ISN'T a recognized github.com PR
+  # URL is not silently treated as a harmless branch name — same fail-closed
+  # rule as an unknown flag.
+  URL_REPO=""
+  case "$PARSED_PR_ID" in
+    https://github.com/*/*/pull/*)
+      if [[ "$PARSED_PR_ID" =~ ^https://github\.com/([^/]+/[^/]+)/pull/[0-9]+/?$ ]]; then
+        URL_REPO=$(printf '%s' "${BASH_REMATCH[1]}" | tr 'A-Z' 'a-z')
+      else
+        deny "MERGE GATE (ESCALATE_HUMAN): the PR identifier '$PARSED_PR_ID' looks like a GitHub PR URL but doesn't match the recognized github.com owner/repo/pull/number shape. A merge must never be evaluated by guessing which repository a malformed URL names."
+      fi
+      ;;
+    *://*)
+      deny "MERGE GATE (ESCALATE_HUMAN): the PR identifier '$PARSED_PR_ID' looks like a URL this gate doesn't recognize as a GitHub PR URL. A merge must never be evaluated by guessing which repository it names."
+      ;;
+  esac
+
+  # gh ALSO reads GH_REPO from the environment when no --repo/-R flag is on
+  # the command line — this hook's OWN process environment is the same one
+  # the real `gh pr merge` will run in, so an exported GH_REPO here is a
+  # genuine signal, not noise. This is exactly why the flag-parsed value
+  # above lives in PARSED_REPO, never in a variable literally named
+  # GH_REPO: reusing gh's own environment-variable name for internal state
+  # made an ambiently-exported GH_REPO indistinguishable from "the command
+  # itself set --repo" — the classic collision. If this fires on a
+  # same-repo merge unexpectedly, `unset GH_REPO` in the shell and retry.
+  ENV_REPO=$(printf '%s' "${GH_REPO:-}" | tr 'A-Z' 'a-z')
+  FLAG_REPO=$(printf '%s' "$PARSED_REPO" | sed 's/^["'\'']*//; s/["'\'']*$//' | tr 'A-Z' 'a-z')
+
+  # Collect DISTINCT non-empty repo signals. More than one, disagreeing, is
+  # ambiguous — refuse to guess which one gh will actually honor rather
+  # than picking one and being wrong.
+  SIGNAL_SET=""
+  for sig in "$FLAG_REPO" "$URL_REPO" "$ENV_REPO"; do
+    [ -z "$sig" ] && continue
+    case " $SIGNAL_SET " in
+      *" $sig "*) : ;;
+      *) SIGNAL_SET="$SIGNAL_SET $sig" ;;
+    esac
+  done
+  SIGNAL_SET=$(printf '%s' "$SIGNAL_SET" | sed 's/^ *//; s/ *$//')
+  SIGNAL_COUNT=0
+  [ -n "$SIGNAL_SET" ] && SIGNAL_COUNT=$(printf '%s\n' "$SIGNAL_SET" | wc -w | tr -d ' ')
+
+  if [ "$SIGNAL_COUNT" -gt 1 ]; then
+    deny "MERGE GATE (ESCALATE_HUMAN): this command's repository selectors disagree — flag/PR-URL/environment GH_REPO name different repos ($SIGNAL_SET). This gate will not guess which one 'gh' will actually honor; a wrong guess here means authorizing a merge in a repo these artifacts say nothing about."
+  elif [ "$SIGNAL_COUNT" -eq 1 ]; then
+    EFFECTIVE_REPO="$SIGNAL_SET"
+    ORIGIN_SLUG=$(git -C "$ROOT" remote get-url origin 2>/dev/null \
+      | sed -e 's#\.git$##' -e 's#.*[:/]\([^/][^/]*/[^/][^/]*\)$#\1#' | tr 'A-Z' 'a-z')
+    if [ -n "$ORIGIN_SLUG" ] && [ "$EFFECTIVE_REPO" != "$ORIGIN_SLUG" ]; then
+      deny "MERGE GATE (ESCALATE_HUMAN): this command merges a PR in '$EFFECTIVE_REPO', but it is running against a checkout of '$ORIGIN_SLUG'. The gate artifacts here (review verdict, verify ledger, security findings) describe '$ORIGIN_SLUG' and say NOTHING about '$EFFECTIVE_REPO', so it cannot evaluate this merge — and it will not judge one repo by another repo's verdict. Run the merge from inside a checkout of '$EFFECTIVE_REPO' so that repo's own gates apply."
+    fi
   fi
 fi
 
@@ -399,49 +636,24 @@ HEAD_SHA=$(git -C "$ROOT" rev-parse HEAD 2>/dev/null)
 # not found, not authenticated, network hiccup), DENY. A merge that cannot
 # be evaluated against its real content is never let through unevaluated.
 if [ "$merge_kind" = "gh pr merge" ]; then
-  # The PR identifier (number or URL) is the first bare (non-flag) token
-  # after "merge"; every value-taking flag `gh pr merge` accepts (short AND
-  # long form) is skipped so its value is never mistaken for it. A short flag
-  # missing from this list is not "harmless" — `-b 91 99 --squash` would
-  # silently resolve PR 91's head while `gh` itself merges PR 99, pinning
-  # every gate below to the wrong commit's (possibly clean) artifacts. `gh pr
-  # merge` with no identifier at all resolves the PR from the current branch,
-  # which `gh pr view` does too, so an empty PR_ID is passed straight through.
-  PR_REST=$(printf '%s' "$VECTOR_SEG" | sed -E 's/^gh[[:space:]]+pr[[:space:]]+merge[[:space:]]*//')
-  PR_VALUE_FLAGS=" -A --author-email -b --body -F --body-file -t --subject --match-head-commit -R --repo "
-  PR_ID=""
-  pr_skip_next=0
-  # shellcheck disable=SC2086
-  set -- $PR_REST
-  for tok in "$@"; do
-    if [ "$pr_skip_next" -eq 1 ]; then pr_skip_next=0; continue; fi
-    case "$tok" in
-      -*)
-        case "$tok" in
-          *=*) : ;;
-          *)
-            for vf in $PR_VALUE_FLAGS; do
-              [ "$tok" = "$vf" ] && { pr_skip_next=1; break; }
-            done
-            ;;
-        esac
-        ;;
-      *)
-        PR_ID="$tok"; break ;;
-    esac
-  done
+  # PARSED_PR_ID and EFFECTIVE_REPO were already resolved above — the SAME
+  # parse pass that decided the cross-repo refusal — and are reused here
+  # rather than re-parsing $VECTOR_SEG a second time with separate logic.
+  # Two independent regex passes over the same string disagreeing about
+  # which repo/PR-id a command named is exactly the shape of bug this
+  # unification closes.
 
   # One call, both refs — headRefOid AND baseRefOid — parsed locally with jq
   # rather than gh's own --jq, so a single captured payload answers both.
-  if [ -n "${GH_REPO:-}" ]; then
-    if [ -n "$PR_ID" ]; then
-      PR_VIEW_JSON=$(cd "$ROOT" 2>/dev/null && gh pr view "$PR_ID" --repo "$GH_REPO" --json headRefOid,baseRefOid 2>/dev/null)
+  if [ -n "$EFFECTIVE_REPO" ]; then
+    if [ -n "$PARSED_PR_ID" ]; then
+      PR_VIEW_JSON=$(cd "$ROOT" 2>/dev/null && gh pr view "$PARSED_PR_ID" --repo "$EFFECTIVE_REPO" --json headRefOid,baseRefOid 2>/dev/null)
     else
-      PR_VIEW_JSON=$(cd "$ROOT" 2>/dev/null && gh pr view --repo "$GH_REPO" --json headRefOid,baseRefOid 2>/dev/null)
+      PR_VIEW_JSON=$(cd "$ROOT" 2>/dev/null && gh pr view --repo "$EFFECTIVE_REPO" --json headRefOid,baseRefOid 2>/dev/null)
     fi
   else
-    if [ -n "$PR_ID" ]; then
-      PR_VIEW_JSON=$(cd "$ROOT" 2>/dev/null && gh pr view "$PR_ID" --json headRefOid,baseRefOid 2>/dev/null)
+    if [ -n "$PARSED_PR_ID" ]; then
+      PR_VIEW_JSON=$(cd "$ROOT" 2>/dev/null && gh pr view "$PARSED_PR_ID" --json headRefOid,baseRefOid 2>/dev/null)
     else
       PR_VIEW_JSON=$(cd "$ROOT" 2>/dev/null && gh pr view --json headRefOid,baseRefOid 2>/dev/null)
     fi
@@ -450,10 +662,10 @@ if [ "$merge_kind" = "gh pr merge" ]; then
   PR_BASE_SHA=$(printf '%s' "${PR_VIEW_JSON:-}" | jq -r '.baseRefOid // empty' 2>/dev/null)
 
   if [ -z "$PR_HEAD_SHA" ] || ! [[ "$PR_HEAD_SHA" =~ ^[0-9a-f]{7,40}$ ]]; then
-    deny "MERGE GATE (ESCALATE_HUMAN): could not resolve the PR's head commit (\`gh pr view${PR_ID:+ $PR_ID}${GH_REPO:+ --repo $GH_REPO} --json headRefOid,baseRefOid\` failed or returned nothing usable). A merge must never be evaluated against the wrong commit, or left unevaluated — check that 'gh' is installed and authenticated and that the PR exists, then retry."
+    deny "MERGE GATE (ESCALATE_HUMAN): could not resolve the PR's head commit (\`gh pr view${PARSED_PR_ID:+ $PARSED_PR_ID}${EFFECTIVE_REPO:+ --repo $EFFECTIVE_REPO} --json headRefOid,baseRefOid\` failed or returned nothing usable). A merge must never be evaluated against the wrong commit, or left unevaluated — check that 'gh' is installed and authenticated and that the PR exists, then retry."
   fi
   if [ -z "$PR_BASE_SHA" ] || ! [[ "$PR_BASE_SHA" =~ ^[0-9a-f]{7,40}$ ]]; then
-    deny "MERGE GATE (ESCALATE_HUMAN): resolved the PR's head commit but not its base (\`gh pr view${PR_ID:+ $PR_ID}${GH_REPO:+ --repo $GH_REPO} --json headRefOid,baseRefOid\` returned no usable baseRefOid). Without the PR's real base, the diff-based gates cannot tell what THIS PR changed versus what was already on main — do not guess by falling back to local HEAD."
+    deny "MERGE GATE (ESCALATE_HUMAN): resolved the PR's head commit but not its base (\`gh pr view${PARSED_PR_ID:+ $PARSED_PR_ID}${EFFECTIVE_REPO:+ --repo $EFFECTIVE_REPO} --json headRefOid,baseRefOid\` returned no usable baseRefOid). Without the PR's real base, the diff-based gates cannot tell what THIS PR changed versus what was already on main — do not guess by falling back to local HEAD."
   fi
   HEAD_SHA="$PR_HEAD_SHA"
   DIFF_BASE="$PR_BASE_SHA"

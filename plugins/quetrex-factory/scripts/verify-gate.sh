@@ -25,6 +25,19 @@
 #     missing file is a genuine failure, not a toolchain excuse. Missing tooling
 #     or deps therefore surface as an honest block: the agent installs/fixes
 #     (bounded self-heal) or, at the cap, escalates to the user.
+#   - There is NO fail-open on a missing `jq`. With jq, block() emits a
+#     well-formed {"decision":"block",...} on exit 0. WITHOUT jq it does not
+#     hand-roll JSON escaping (a failing build's stderr carries tabs/CRs/ANSI
+#     that would malform the payload, and a malformed payload is DROPPED and
+#     read as ALLOW); it prints the reason to stderr and exits 2 — the hook
+#     contract's other blocking channel, which has no JSON to malform. Either
+#     way a missing dependency can never silently allow a red finish.
+#   - There is NO fail-open on a hook timeout. The whole chain runs against an
+#     internal wall-clock budget (QUETREX_VERIFY_BUDGET, default well under the
+#     external Stop/SubagentStop hook timeout) with each command capped via
+#     `timeout`/`gtimeout` (or a kill-watchdog fallback). Exhausting the budget
+#     is RED, blocked with a clear time-budget reason — the chain can never
+#     run long enough to be killed by the external timeout before it emits.
 #
 # Single source of truth for the chain (in priority order):
 #   1. $ROOT/.quetrex/verify.json  -> .verify[]   (canonical; written by init)
@@ -73,14 +86,22 @@
 # 600, same symlink-safe unlink-before-redirect), and the reason points there
 # instead. A green/skip-only run never touches it; a new RED run replaces it.
 #
-# THIS FILE HAS NO PRIMARY-CHECKOUT / WORKTREE DEFERRAL SKIP, AND MUST NEVER
-# GAIN ONE. `git worktree add -b <branchPrefix>x decoy` is on the Bash
-# allow-list; any code path that lets one checkout's "proven" state excuse
-# another checkout's chain is a one-command permanent ungate (see
-# quetrex-base's history of that exact defect, SEC-1). Every checkout,
-# including the one with no linked worktree, always runs the chain itself.
-# The only skip that exists is the declarative, per-command, committed-only
-# requiredEnv skip below.
+# THERE IS NO PRIMARY-CHECKOUT DEFERRAL. This hook used to skip the chain in
+# the repo's primary checkout whenever a linked worktree on the project's
+# branchPrefix looked like it was "proven" by its own ledger. That skip was
+# removed outright (SEC-1, high): `git worktree add -b claude/x decoy` is on
+# the Bash allow-list and cost the gated agent exactly one command to
+# permanently ungate the primary checkout, and every attempted proof
+# requirement (a ledger line sha-pinned to the candidate's own HEAD) was
+# fabricable by the same agent writing a JSON line into a file it fully
+# controls, or by leaving a once-genuinely-proven worktree abandoned on disk
+# forever. No attestation scheme can fix this class: any secret the check
+# reads is readable by the agent it polices. There is now NO code path in
+# this file that skips the chain based on any worktree, branch,
+# project.json field, or environment override — every checkout, including
+# the one with no linked worktree, always runs the chain here. The only skip
+# that survives is the declarative, per-command, committed-only requiredEnv
+# skip below.
 #
 # DECLARATIVE ENV SKIP. A command whose verify.json `requiredEnv` entry names a
 # variable that is genuinely unavailable in THIS checkout is never executed —
@@ -168,12 +189,50 @@ QUICK=0
 QUICK_NOTE=""
 [ "$EVENT" = "SubagentStop" ] && QUICK=1
 
+# --- fail-closed time budget -------------------------------------------------
+# The chain below runs synchronously inside a Stop (900s) / SubagentStop
+# (600s) hook timeout (wired in quetrex-install-project-gates.sh). If the
+# chain runs long enough for the hook to be killed mid-run, no block is ever
+# emitted -> the finish is silently allowed with the tree unproven (fail-open
+# via timeout). To fail CLOSED instead, every verify command below runs under
+# an internal time budget kept safely under the external hook timeout, with
+# headroom; exhausting it is treated as RED, not skipped. QUETREX_VERIFY_BUDGET
+# (seconds) overrides the default for either event, and lets a single tiny
+# value prove the fail-closed path (e.g. QUETREX_VERIFY_BUDGET=2 with a
+# `sleep 5` command in the chain produces a block).
+BUDGET_DEFAULT=840
+[ "$EVENT" = "SubagentStop" ] && BUDGET_DEFAULT=540
+BUDGET_TOTAL="${QUETREX_VERIFY_BUDGET:-$BUDGET_DEFAULT}"
+case "$BUDGET_TOTAL" in ''|*[!0-9]*) BUDGET_TOTAL="$BUDGET_DEFAULT" ;; esac
+[ "$BUDGET_TOTAL" -gt 0 ] 2>/dev/null || BUDGET_TOTAL="$BUDGET_DEFAULT"
+
 # --- helpers ---------------------------------------------------------------
 
 # Emit a Stop/SubagentStop block and exit 0 (the only honored form).
+# FAIL-CLOSED even when jq is unavailable: if jq were the only path and it is
+# missing, the jq call would fail silently, NOTHING would reach stdout, and
+# `exit 0` would still run -> Stop/SubagentStop treat "exit 0 + no decision
+# JSON" as ALLOW, so every red build would finish as allowed.
+#
+# The no-jq fallback deliberately emits NO JSON. A hand-rolled escaper is a
+# fail-open in disguise: the string being escaped is the tail of a FAILING
+# BUILD's stderr, which routinely carries tabs, carriage returns, ANSI escapes
+# and other raw control bytes that are illegal unescaped inside a JSON string.
+# One of those produces malformed JSON, the runtime drops the undecodable
+# payload, and "exit 0 + no decision" is read as ALLOW — exactly the red-finish
+# this function exists to prevent. So instead of trying (and silently failing)
+# to build JSON without jq, the fallback uses the OTHER blocking channel the
+# hook contract provides: exit 2 is a blocking error whose stderr is fed back
+# to the agent. There is no JSON to malform, so it cannot degrade to allow.
+# jq stays the primary path because it produces the richer `reason` form.
 block() {
-  jq -cn --arg r "$1" '{decision:"block",reason:$r}'
-  exit 0
+  local reason="$1"
+  if command -v jq >/dev/null 2>&1; then
+    jq -cn --arg r "$reason" '{decision:"block",reason:$r}'
+    exit 0
+  fi
+  printf '%s\n' "$reason" >&2
+  exit 2
 }
 
 # Last-20-lines of a captured output.
@@ -304,7 +363,7 @@ resolve_from_verify_json || resolve_from_claude_md || resolve_autodetect || {
 
 mkdir -p "$QDIR"
 
-# --- full-output log (QUIET output) -----------------------------------------
+# --- full-output log (QUIET fix part a) -------------------------------------
 # Every command's FULL captured stdout+stderr is written here, never into the
 # block reason. Recreated fresh each run so it always reflects THIS attempt.
 # Mode 600 from creation: a failing build's output can contain values it
@@ -325,7 +384,7 @@ fi
 ( umask 077; : > "$LOG" ) 2>/dev/null
 chmod 600 "$LOG" 2>/dev/null
 
-# --- DECLARATIVE ENV SKIP ----------------------------------------------------
+# --- DECLARATIVE ENV SKIP (fix part c) --------------------------------------
 # Pre-flight only — NEVER inferred from a command's output. Returns 0 (skip)
 # and sets MISSING_ENV_VAR when `cmd` has a requiredEnv entry in verify.json
 # and every constraint in the header comment is satisfied; returns 1 (run it)
@@ -347,10 +406,10 @@ should_skip_for_env() {
   # Constraint 1: `cmd` must be a byte-for-byte member of the COMMITTED
   # verify[] ARRAY (type ASSERTED, not assumed: when `.verify` is a STRING,
   # jq's `index()` degrades to a SUBSTRING search, so a command that merely
-  # CONTAINS `cmd` as a substring would incorrectly satisfy this check) AND
-  # the committed requiredEnv must declare vars for that exact key. A
-  # foreign/typo'd requiredEnv key that happens not to equal any verify[]
-  # entry simply cannot skip anything.
+  # CONTAINS `cmd` as a substring would incorrectly satisfy this check — see
+  # ADV-D) AND the committed requiredEnv must declare vars for that exact
+  # key. A foreign/typo'd requiredEnv key that happens not to equal any
+  # verify[] entry simply cannot skip anything.
   printf '%s' "$committed_verify_json" | jq -e --arg c "$cmd" \
     '(.verify // []) as $v | ($v | type) == "array" and (($v | index($c)) != null)' \
     >/dev/null 2>&1 || return 1
@@ -372,14 +431,21 @@ should_skip_for_env() {
     esac
     case "$v" in *[!A-Za-z0-9_]*) continue ;; esac
     # Constraint 2: the repo itself must declare this as required config, and
-    # that DECLARATION must be visible in a reviewed diff. Two escapes closed
-    # here: an UNTRACKED .env.example is invisible to any reviewer, so
-    # tracking is required; and a tracked file can still carry an UNCOMMITTED
-    # working-tree edit, so the declaring line is read from the COMMITTED
-    # blob at HEAD, never the live working-tree file, and never the staged
-    # index either (a staged-but-uncommitted change appears in no reviewed
-    # diff). Fail CLOSED if the committed blob cannot be read at all.
-    # Read at the PINNED $HEAD_SHA (SEC-2), never a fresh `HEAD`.
+    # that DECLARATION must be visible in a reviewed diff — per security_surface
+    # constraint #2. Two escapes closed here:
+    #   - a plain existence/grep check on disk is not enough (an UNTRACKED
+    #     .env.example is invisible to any reviewer), so tracking is required; and
+    #   - checking that the PATH is tracked is not enough either (a tracked file
+    #     can still carry an UNCOMMITTED working-tree edit that grep would read
+    #     straight off disk — `git ls-files` only proves the PATH is tracked,
+    #     not that THIS line is). So the declaring line must be read from the
+    #     COMMITTED blob at HEAD, never the live working-tree file. Only HEAD
+    #     counts, not the staged index: a staged-but-uncommitted change still
+    #     appears in no reviewed diff (nothing has been committed for a
+    #     reviewer to see), so `git show :file` is deliberately NOT used here.
+    #     Fail CLOSED: if the committed blob cannot be read at all (no HEAD,
+    #     file absent at HEAD, git error), it does not count as declared.
+    #     Read at the PINNED $HEAD_SHA (SEC-2), never a fresh `HEAD`.
     declared=0
     for exfile in .env.example .env.sample; do
       committed=$(git -C "$ROOT" show "$HEAD_SHA:$exfile" 2>/dev/null) || continue
@@ -423,6 +489,37 @@ SKIPPED_CMDS=""
 FAILED_CMD=""
 FAILED_TAIL=""
 FAILED_CODE=0
+TIMED_OUT=0
+
+# Run a single command under a wall-clock cap so a hang cannot silently burn
+# through the external hook timeout. Prefers GNU `timeout`/`gtimeout`; if
+# neither is installed, falls back to a background watchdog that SIGKILLs
+# the command when its slice of the budget elapses — the chain must never be
+# allowed to run unbounded regardless of what's on PATH. Sets CMD_OUT/CMD_CODE.
+run_with_cap() {
+  local cmd="$1" cap="$2"
+  local tmo=""
+  if command -v timeout >/dev/null 2>&1; then tmo="timeout"
+  elif command -v gtimeout >/dev/null 2>&1; then tmo="gtimeout"
+  fi
+  if [ -n "$tmo" ]; then
+    CMD_OUT=$( ( cd "$ROOT" && "$tmo" -k 5 "${cap}s" bash -c "$cmd" ) 2>&1 )
+    CMD_CODE=$?
+  else
+    local outfile
+    outfile=$(mktemp "${TMPDIR:-/tmp}/quetrex-verify-out.XXXXXX" 2>/dev/null) || outfile="$QDIR/.verify-out.$$"
+    ( cd "$ROOT" && bash -c "$cmd" ) >"$outfile" 2>&1 &
+    local cpid=$!
+    ( sleep "$cap"; kill -9 "$cpid" 2>/dev/null ) &
+    local wpid=$!
+    wait "$cpid" 2>/dev/null; CMD_CODE=$?
+    kill "$wpid" 2>/dev/null; wait "$wpid" 2>/dev/null
+    CMD_OUT=$(cat "$outfile" 2>/dev/null)
+    rm -f "$outfile" 2>/dev/null
+  fi
+}
+
+BUDGET_START=$(date +%s)
 
 for cmd in "${CHAIN[@]}"; do
   if should_skip_for_env "$cmd"; then
@@ -437,8 +534,24 @@ for cmd in "${CHAIN[@]}"; do
     SKIPPED_CMDS="${SKIPPED_CMDS:+$SKIPPED_CMDS, }\`${cmd}\`"
     continue
   fi
-
-  out=$( ( cd "$ROOT" && eval "$cmd" ) 2>&1 ); code=$?
+  now=$(date +%s)
+  remaining=$((BUDGET_TOTAL - (now - BUDGET_START)))
+  if [ "$remaining" -le 0 ]; then
+    # The budget was already exhausted by prior commands in this chain -> the
+    # gate fails CLOSED rather than skipping the rest of the chain unproven.
+    code=124
+    out="TIMEOUT: the ${BUDGET_TOTAL}s verification time budget (QUETREX_VERIFY_BUDGET) was exhausted before this command could run."
+    TIMED_OUT=1
+  else
+    run_with_cap "$cmd" "$remaining"
+    code="$CMD_CODE"
+    out="$CMD_OUT"
+    if [ "$code" -eq 124 ] || [ "$code" -eq 137 ]; then
+      TIMED_OUT=1
+      out="${out}
+TIMEOUT: this command exceeded its ${remaining}s share of the ${BUDGET_TOTAL}s verification time budget (QUETREX_VERIFY_BUDGET) and was killed."
+    fi
+  fi
   ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   t20=$(tail20 "$out")
 
@@ -499,7 +612,7 @@ if [ "$RED" -eq 0 ]; then
   # A skip is NOT a green: it proves nothing about the skipped command, so a
   # run that skipped anything must not reset the self-heal counter or clear a
   # prior escalation. Only a run where every chain command genuinely executed
-  # and exited 0 may do either (CONTAINMENT).
+  # and exited 0 may do either (CONTAINMENT — see header comment / AC7).
   if [ "$SKIPPED" -eq 0 ]; then
     echo 0 > "$ATTEMPTS_FILE" 2>/dev/null   # reset self-heal counter on green
     rm -f "$ESCALATION" 2>/dev/null         # green clears any prior escalation
@@ -514,27 +627,37 @@ case "$n" in ''|*[!0-9]*) n=0 ;; esac
 n=$((n + 1))
 echo "$n" > "$ATTEMPTS_FILE" 2>/dev/null
 
+# A time-budget kill is called out explicitly so the agent (and the human on
+# escalation) knows this was a fail-closed timeout, not a normal assertion
+# failure, and knows to split/speed up the chain rather than "fix a bug".
+TIMEOUT_NOTE=""
+if [ "$TIMED_OUT" -eq 1 ]; then
+  TIMEOUT_NOTE=" This is a TIME-BUDGET kill: verification exceeded the ${BUDGET_TOTAL}s time budget (QUETREX_VERIFY_BUDGET) — treat as red; split or speed up the chain."
+fi
+
 # A RED chain can be preceded by earlier commands that were declaratively
-# SKIPPED (requiredEnv unavailable). The block reason must say so here too —
-# not just on the (separate, JSON-free) allow path — so the operator can
-# still tell a real failure from a non-failure. Folded into the reason as a
-# single-line note so it stays within the <=3-line quiet-output budget.
+# SKIPPED (requiredEnv unavailable). This whole task exists because the
+# operator could not tell a real failure from a non-failure, so the block
+# reason must say so here too — not just on the (separate, JSON-free) allow
+# path. Folded into the reason as a single-line note (never a raw stdout line
+# ahead of the block() JSON, which must stay pure — see the allow-path
+# comment below) so it stays within the <=3-line quiet-output budget.
 SKIP_NOTE=""
 if [ -n "$SKIPPED_CMDS" ]; then
   SKIP_NOTE=" NOTE: also SKIPPED before this failure (requiredEnv unavailable, never proven): ${SKIPPED_CMDS}."
 fi
 
-# QUIET BLOCK REASONS. One labelled summary line — what ran, which
-# checkout/branch, whether it blocks — plus a line pointing at $FAILLOG, the
-# preserved-failure slot (survives the next invocation, unlike the live
-# $LOG). FAILED_TAIL is deliberately never interpolated here.
+# QUIET BLOCK REASONS (fix part a). One labelled summary line — what ran,
+# which checkout/branch, whether it blocks — plus a line pointing at
+# $FAILLOG, the preserved-failure slot (survives the next invocation, unlike
+# the live $LOG). FAILED_TAIL is deliberately never interpolated here.
 if [ "$n" -lt "$MAX_ATTEMPTS" ]; then
-  block "$(printf 'VERIFY FAILED (attempt %d/%d): `%s` exited %d in %s (branch %s).%s%s BLOCKS finish — fix the cause; it re-runs on your next stop.\nFull output: %s' \
-    "$n" "$MAX_ATTEMPTS" "$FAILED_CMD" "$FAILED_CODE" "$ROOT" "${CUR_BRANCH:-<detached>}" "$QUICK_NOTE" "$SKIP_NOTE" "$FAILLOG")"
+  block "$(printf 'VERIFY FAILED (attempt %d/%d): `%s` exited %d in %s (branch %s).%s%s%s BLOCKS finish — fix the cause; it re-runs on your next stop.\nFull output: %s' \
+    "$n" "$MAX_ATTEMPTS" "$FAILED_CMD" "$FAILED_CODE" "$ROOT" "${CUR_BRANCH:-<detached>}" "$TIMEOUT_NOTE" "$QUICK_NOTE" "$SKIP_NOTE" "$FAILLOG")"
 fi
 
 # Cap reached -> escalate. Persist a marker the merge gate reads so red code
 # physically cannot merge even once the agent is finally allowed to stop.
 touch "$ESCALATION" 2>/dev/null
-block "$(printf 'ESCALATE: `%s` is STILL red (exit %d) after %d self-heal attempts in %s (branch %s).%s%s BLOCKS finish — STOP self-healing.\nFull output: %s\nReport this one-line summary and the log path to the user; do NOT paste command output into your closing message. Wait for direction.' \
-  "$FAILED_CMD" "$FAILED_CODE" "$MAX_ATTEMPTS" "$ROOT" "${CUR_BRANCH:-<detached>}" "$QUICK_NOTE" "$SKIP_NOTE" "$FAILLOG")"
+block "$(printf 'ESCALATE: `%s` is STILL red (exit %d) after %d self-heal attempts in %s (branch %s).%s%s%s BLOCKS finish — STOP self-healing.\nFull output: %s\nReport this one-line summary and the log path to the user; do NOT paste command output into your closing message. Wait for direction.' \
+  "$FAILED_CMD" "$FAILED_CODE" "$MAX_ATTEMPTS" "$ROOT" "${CUR_BRANCH:-<detached>}" "$TIMEOUT_NOTE" "$QUICK_NOTE" "$SKIP_NOTE" "$FAILLOG")"

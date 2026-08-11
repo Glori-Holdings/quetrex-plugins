@@ -26,16 +26,28 @@
 #      or the separate security-reviewer agent's HEAD-pinned
 #      security-findings.json is clean, or no security review was required at
 #      all. The reviewer still cannot self-exempt and auto-merge (see GATE 2b).
-#   3. .quetrex/verify-ledger.jsonl is GREEN: for every command in the current
-#      verify chain, its MOST RECENT ledger entry exited 0 (a never-run or
-#      stale-red command blocks — this closes the stale-green hole).
+#   3. .quetrex/verify-ledger.jsonl is GREEN: for every command in the verify
+#      chain THE MERGED COMMIT ITSELF defines (read from the committed
+#      .quetrex/verify.json at that sha — never the operator's working tree,
+#      which during a `gh pr merge` is the BASE branch's copy), the most recent
+#      ledger entry THAT DESCRIBES THAT COMMIT exited 0. A never-run command, a
+#      red one, and a chain with no evidence for the merged commit at all all
+#      block — this closes the stale-green hole. Entries pinned to some OTHER
+#      commit (e.g. the local Stop-hook verify cycle appending against the
+#      operator's main between the fetch and the merge) are evidence about
+#      other code: they neither authorize this merge nor shadow the proof of it.
 #   4. .quetrex/security-findings.json has NO finding with severity "critical"
 #      AND status "open"; if it exists it must be for HEAD (.head_sha == HEAD);
 #      and if the plan set security_review_required:true it MUST exist.
 #   5. Every file in the diff being merged is covered by the architect's
 #      ownership map in .quetrex/plan/<TASK>.json — a developer that edited
 #      outside its lane cannot ship (see GATE 5 for the exemptions and for what
-#      happens when a task ran without a plan).
+#      happens when a task ran without a plan). That plan, and the
+#      .quetrex/state.json that names which task this merge is for, are
+#      TRANSPORTED HOME from the cloud build on the <prefix><TASK>-gates branch
+#      alongside the other artifacts; a plan whose approved base_sha is provably
+#      not an ancestor of the merged commit is another task's leftover and is
+#      refused rather than applied.
 #
 # DESIGN AXIOM (from the blueprint): the merge boundary is decided by hooks
 # reading artifacts, never by an agent's prose. A Critical/BLOCK/REWORK from any
@@ -1201,6 +1213,58 @@ evaluate_vector() {
   # (b) is the floor that makes security non-bypassable: a plan that simply omits
   # the flag (defaulting it false) cannot ship sensitive code unreviewed, because
   # the gate inspects the diff itself, not the agent's classification of it.
+  #
+  # WHERE THE PLAN COMES FROM. Both this file and .quetrex/state.json are
+  # written by the CLOUD session, published onto the <prefix><TASK>-gates
+  # branch alongside the verify ledger / review verdict / QA report / security
+  # findings, and fetched into the operator's .quetrex/ by /quetrex:merge — the
+  # same transport as every other artifact these gates read. Before that
+  # transport existed the plan NEVER reached the operator's checkout, so this
+  # flag and GATE 5's ownership map were structurally dead on the only
+  # supported execution route. A unit that genuinely has no plan (TRIVIAL and
+  # SIMPLE routes run without an architect) still lands here with PLAN="" and
+  # is still skipped, not failed — see GATE 5's note.
+  #
+  # plan_is_foreign — is a plan artifact on disk PROVABLY about other work?
+  #
+  # A plan now being present locally is new, and it introduces a failure mode
+  # that could not happen before: /quetrex:merge removes these files in its
+  # cleanup step, but an aborted or interrupted merge leaves them behind, and
+  # the NEXT merge in that checkout would then be judged against a previous
+  # task's lanes — GATE 5 denying clean work for violating a contract it was
+  # never party to, which is exactly the failure the multi-plan escalation
+  # below exists to prevent.
+  #
+  # The binding is the plan's own `base_sha` — the approved base the dispatcher
+  # stamped, from which the cloud cut the branch. The commit being merged
+  # DESCENDS from it. If it provably does not, the plan describes a different
+  # line of work.
+  #
+  # NARROW ON PURPOSE — only a PROVEN mismatch counts. A null/absent/malformed
+  # base_sha (older plan schema, a local run the dispatcher never stamped), a
+  # commit object this checkout does not have, or any git error all return
+  # "not foreign" and leave behavior exactly as it was. Only `merge-base
+  # --is-ancestor` answering a definite NO (exit 1) trips it.
+  plan_is_foreign() {  # plan_is_foreign <plan-file> -> 0 when PROVABLY another task's
+    local pf="$1" pbase rc
+    [ -n "$pf" ] && [ -f "$pf" ] || return 1
+    [ -n "$HEAD_SHA" ] || return 1
+    pbase=$(jq -r '.base_sha // empty' "$pf" 2>/dev/null)
+    [[ "$pbase" =~ ^[0-9a-f]{7,40}$ ]] || return 1
+    git -C "$ROOT" cat-file -e "${pbase}^{commit}" 2>/dev/null || return 1
+    git -C "$ROOT" cat-file -e "${HEAD_SHA}^{commit}" 2>/dev/null || return 1
+    git -C "$ROOT" merge-base --is-ancestor "$pbase" "$HEAD_SHA" 2>/dev/null
+    rc=$?
+    [ "$rc" -eq 1 ] && return 0
+    return 1
+  }
+  deny_if_plan_is_foreign() {  # deny_if_plan_is_foreign <plan-file>
+    local pf="$1" pbase
+    plan_is_foreign "$pf" || return 0
+    pbase=$(jq -r '.base_sha // empty' "$pf" 2>/dev/null)
+    deny "MERGE GATE (ESCALATE_HUMAN): $(basename "$pf") records base_sha ${pbase:0:12}, which is NOT an ancestor of the commit being merged (${HEAD_SHA:0:12}) — this plan describes a different unit of work, so its security flag and file-ownership map say nothing about this diff. The gate will not judge one task's merge by another task's contract. This is almost always a leftover from an interrupted /quetrex:merge: remove the stale plan from .quetrex/plan/ (and repair .quetrex/state.json) so the plan for THIS task governs, then retry."
+  }
+
   PLAN=""
   TASK=$(jq -r '.task // empty' "$QDIR/state.json" 2>/dev/null)
   if [ -n "$TASK" ] && [ -f "$QDIR/plan/$TASK.json" ]; then
@@ -1209,6 +1273,7 @@ evaluate_vector() {
     # Fall back to any single plan file if state.json is unavailable.
     PLAN=$(ls -1 "$QDIR"/plan/*.json 2>/dev/null | head -n1)
   fi
+  [ -n "$PLAN" ] && deny_if_plan_is_foreign "$PLAN"
   PLAN_SEC="false"
   [ -n "$PLAN" ] && PLAN_SEC=$(jq -r '.security_review_required // false' "$PLAN" 2>/dev/null)
 
@@ -1488,55 +1553,164 @@ evaluate_vector() {
     deny "MERGE GATE (REWORK): .quetrex/verify-ledger.jsonl is missing or empty — QA never proved the verify chain green. Run the pipeline's QA stage before merging."
   fi
 
-  # Resolve the current verify chain (single source of truth: verify.json).
-  CHAIN_JSON=$(jq -c 'if (.verify | type) == "array" and (.verify | length) > 0 then .verify else empty end' "$QDIR/verify.json" 2>/dev/null)
-
-  if [ -n "$CHAIN_JSON" ]; then
-    # For each chain command, its latest ledger entry must be exit 0 AND for HEAD.
-    # null exit = never ran = fail; a sha != HEAD = stale-green = fail.
-    RED=$(jq -sc --argjson chain "$CHAIN_JSON" --arg head "$HEAD_SHA" '
-      (reduce .[] as $e ({}; .[$e.cmd] = {exit:$e.exit, sha:($e.sha // "")})) as $last
-      | [ $chain[]
-          | ($last[.] // {exit:null, sha:null}) as $l
-          | { cmd: ., exit: $l.exit, sha: $l.sha }
-          | select(.exit != 0 or (.sha != $head)) ]
-    ' "$LEDGER" 2>/dev/null)
-  else
-    # No canonical chain resolvable — fall back to: every command that appears in
-    # the ledger must have its latest run green AND pinned to HEAD (conservative;
-    # a lingering red or stale-commit command blocks). Still refuses stale-green.
-    RED=$(jq -sc --arg head "$HEAD_SHA" '
-      (reduce .[] as $e ({}; .[$e.cmd] = {exit:$e.exit, sha:($e.sha // "")}))
-      | to_entries
-      | map(select(.value.exit != 0 or (.value.sha != $head)) | {cmd:.key, exit:.value.exit, sha:.value.sha})
-    ' "$LEDGER" 2>/dev/null)
+  # --- WHICH CHAIN? the one the COMMIT BEING MERGED defines -------------------
+  #
+  # THE BUG THIS FIXES (reproduced live). This used to read `$QDIR/verify.json`
+  # — the file in the operator's WORKING TREE, which during a `gh pr merge` is
+  # the BASE branch's version, not the PR's. The cloud build ran the chain the
+  # PR HEAD's verify.json defines and wrote ledger entries for THOSE commands.
+  # So any PR that renames or replaces a verify command ("add a lint step",
+  # "switch test runner", anything /quetrex:init would regenerate) was
+  # PERMANENTLY unmergeable: the gate demanded a ledger entry for a command the
+  # merged code no longer defines, the approved build was never supposed to
+  # produce one, and the only way to update the local verify.json was to land
+  # the PR the gate was blocking. The denial text even sent the operator into a
+  # rebuild loop that could never clear it.
+  #
+  # verify-gate.sh already reads the COMMITTED blob at a pinned sha
+  # (`git show "$HEAD_SHA:.quetrex/verify.json"`) for its requiredEnv map, for
+  # exactly this class of reason. Reading the working tree here meant the two
+  # gates disagreed about what the chain even IS. They no longer do.
+  #
+  # FALLBACK ORDER IS DELIBERATELY STRICTER-FIRST, NEVER LOOSER:
+  #   1. the committed blob at the commit being merged — the authority;
+  #   2. the working-tree file — used ONLY when (1) yields nothing, which is
+  #      the genuinely-untracked-verify.json repo (no committed blob exists at
+  #      ANY sha, so there is nothing stricter to read). A PR that DELETES a
+  #      tracked verify.json therefore still faces the base's chain rather than
+  #      de-gating itself by removing the file;
+  #   3. no chain resolvable at all -> the conservative ledger-derived floor
+  #      below.
+  # MALFORMED LEDGER IS STILL FAIL-CLOSED. The previous implementation keyed an
+  # object by `$e.cmd`, so an entry whose `cmd` was missing or non-string made
+  # jq abort ("Cannot index object with null"), RED came back empty, and the
+  # merge was denied. The evaluation below uses `select(.cmd == $c)` instead,
+  # which would silently IGNORE such an entry — so the check jq used to perform
+  # by crashing is made explicit here rather than lost. An unreadable ledger at
+  # the ship boundary denies; it never quietly proves less than it looks like.
+  if ! jq -se 'all(.[]; type == "object" and (.cmd | type) == "string")' "$LEDGER" >/dev/null 2>&1; then
+    deny "MERGE GATE (ESCALATE_HUMAN): .quetrex/verify-ledger.jsonl is malformed — it is not JSON-lines of objects each carrying a string 'cmd'. The verify chain cannot be proven green from evidence that cannot be read, so the merge is denied. Surface to the user."
   fi
+
+  CHAIN_JSON=""
+  if [ -n "$HEAD_SHA" ] && [[ "$HEAD_SHA" =~ ^[0-9a-f]{7,40}$ ]]; then
+    COMMITTED_VERIFY_JSON=$(git -C "$ROOT" show "$HEAD_SHA:.quetrex/verify.json" 2>/dev/null)
+    if [ -n "$COMMITTED_VERIFY_JSON" ]; then
+      CHAIN_JSON=$(printf '%s' "$COMMITTED_VERIFY_JSON" \
+        | jq -c 'if (.verify | type) == "array" and (.verify | length) > 0 then .verify else empty end' 2>/dev/null)
+    fi
+  fi
+  if [ -z "$CHAIN_JSON" ]; then
+    CHAIN_JSON=$(jq -c 'if (.verify | type) == "array" and (.verify | length) > 0 then .verify else empty end' "$QDIR/verify.json" 2>/dev/null)
+  fi
+
+  if [ -z "$CHAIN_JSON" ]; then
+    # No canonical chain resolvable at either source — fall back to: every
+    # command that appears in the ledger must be proven green for the commit
+    # being merged (conservative; a lingering red or an unproven command
+    # blocks). Deriving the command set from the ledger keeps ONE evaluation
+    # path below instead of a second, subtly-different copy of it.
+    CHAIN_JSON=$(jq -sc '[ .[] | .cmd ] | unique' "$LEDGER" 2>/dev/null)
+    if [ -z "$CHAIN_JSON" ] || [ "$CHAIN_JSON" = "null" ] || [ "$CHAIN_JSON" = "[]" ]; then
+      # A non-empty ledger that yields no evaluable command at all is
+      # unreadable evidence at the ship boundary -> fail closed.
+      deny "MERGE GATE (ESCALATE_HUMAN): could not evaluate .quetrex/verify-ledger.jsonl (malformed JSONL, or no entry carries a command). The verify chain cannot be proven green, so the merge is denied. Surface to the user."
+    fi
+  fi
+
+  # --- WHICH LEDGER LINES? the ones that describe the COMMIT BEING MERGED -----
+  #
+  # THE BUG THIS FIXES (reproduced live). This used to take the LAST entry per
+  # command, full stop. verify-gate.sh is a Stop/SubagentStop hook with NO
+  # fast-skip — every turn end runs the chain and APPENDS entries pinned to the
+  # LOCAL checkout's HEAD. /quetrex:merge writes the transported cloud ledger in
+  # step 2 and merges in step 4, so a single Stop firing in between appended a
+  # green pinned to local main and SHADOWED every transported green. The merge
+  # was then denied as STALE with a reason blaming the cloud build ("last green
+  # was for commit X, not HEAD Y — re-run QA on the current commit") while the
+  # real cause was the operator's own machine burying the evidence it had just
+  # fetched. Non-deterministic, too: it depended on whether the agent's turn
+  # happened to end between the fetch and the merge.
+  #
+  # The rule is now stated in terms of the commit, not of recency: for each
+  # chain command, the gate looks at the LATEST entry that DESCRIBES THE COMMIT
+  # BEING MERGED and requires it to be exit 0. An entry is "describing" when its
+  # sha IS that commit, or when it is an older sha whose range to it is
+  # artifact-only (the documented self-invalidation escape hatch — unchanged).
+  # An entry pinned to any other commit is evidence about other code and neither
+  # proves nor disproves this merge, so it is ignored rather than allowed to
+  # shadow the real proof.
+  #
+  # NOTHING IS WEAKENED BY THIS. Absence of describing evidence is still a hard
+  # STALE denial, a command absent from the ledger is still "never ran", and the
+  # latest describing entry exiting non-zero is still red and is NOT rescued by
+  # a later green pinned to some other commit. What changed is only that noise
+  # about OTHER commits can no longer stand in for — or bury — the proof about
+  # THIS one.
+  #
+  # jq emits, per chain command: `athead` (the last entry whose sha is exactly
+  # the merged commit, or null) and `persha` (the last entry for each distinct
+  # sha, most-recent-first) so bash can walk it against artifact_only_range_ok,
+  # which is a shell function jq cannot call.
+  RED=$(jq -sc --argjson chain "$CHAIN_JSON" --arg head "$HEAD_SHA" '
+    . as $all
+    | [ $chain[]
+        | . as $c
+        | ( [ $all[] | select(.cmd == $c) | {sha: (.sha // ""), exit: .exit} ] ) as $ent
+        | ( [ $ent[] | select(.sha == $head and $head != "") ] | last ) as $athead
+        | ( reduce ($ent | reverse)[] as $e ({};
+              if has($e.sha) then . else .[$e.sha] = $e end) | [ .[] ] ) as $persha
+        | { cmd: $c, athead: $athead, persha: $persha }
+        | select(.athead == null or .athead.exit != 0) ]
+  ' "$LEDGER" 2>/dev/null)
 
   if [ -z "$RED" ] || [ "$RED" = "null" ]; then
     # jq failed to evaluate the ledger at the ship boundary -> fail closed.
     deny "MERGE GATE (ESCALATE_HUMAN): could not evaluate .quetrex/verify-ledger.jsonl (malformed JSONL?). The verify chain cannot be proven green, so the merge is denied. Surface to the user."
   fi
 
-  # A candidate above is flagged red for exiting non-zero, never running, OR
-  # carrying a sha that isn't HEAD. That last case is only GENUINELY stale
-  # when code actually changed since that green run: if the ledger itself is
-  # what got committed (moving HEAD) and nothing outside .quetrex/ changed
-  # since, the green proof still describes the code being merged. Re-check
-  # each sha-only mismatch against artifact_only_range_ok before treating it
-  # as red — a non-zero exit or a never-ran (null/empty sha) command is
-  # never rescued by this and always stays red.
+  # A candidate above either has a RED entry for the merged commit itself (never
+  # rescued — `why=exit`), or has NO entry for it at all, in which case the only
+  # thing that can still authorize it is an older, artifact-only-range green
+  # (`artifact_only_range_ok`). The per-sha list is walked most-recent-first and
+  # the FIRST describing sha decides: a describing red is not skipped over in
+  # search of an older describing green.
   if [ "$RED" != "[]" ]; then
     STILL_RED="[]"
     while IFS= read -r entry; do
       [ -z "$entry" ] && continue
-      e_exit=$(printf '%s' "$entry" | jq -r '.exit')
-      e_sha=$(printf '%s' "$entry" | jq -r '.sha // empty')
+      e_cmd=$(printf '%s' "$entry" | jq -r '.cmd')
+      e_athead=$(printf '%s' "$entry" | jq -r 'if .athead == null then "" else (.athead.exit | tostring) end')
       genuinely_red=1
-      if [ "$e_exit" = "0" ] && [ -n "$e_sha" ] && [ -n "$HEAD_SHA" ] && artifact_only_range_ok "$e_sha" "$HEAD_SHA"; then
-        genuinely_red=0
+      why="stale"
+      red_exit="null"
+      red_sha=$(printf '%s' "$entry" | jq -r '(.persha[0].sha // "")')
+      if [ -n "$e_athead" ]; then
+        # Evidence for the merged commit exists and is non-zero: red, full stop.
+        why="exit"; red_exit="$e_athead"; red_sha="$HEAD_SHA"
+      elif [ "$(printf '%s' "$entry" | jq -r '.persha | length')" = "0" ]; then
+        why="never"
+      else
+        while IFS= read -r cand; do
+          [ -z "$cand" ] && continue
+          c_sha=$(printf '%s' "$cand" | jq -r '.sha // empty')
+          c_exit=$(printf '%s' "$cand" | jq -r '.exit')
+          [ -n "$c_sha" ] || continue
+          [ -n "$HEAD_SHA" ] || continue
+          artifact_only_range_ok "$c_sha" "$HEAD_SHA" || continue
+          # This entry DOES describe the merged commit (artifact-only range).
+          if [ "$c_exit" = "0" ]; then
+            genuinely_red=0
+          else
+            why="exit"; red_exit="$c_exit"; red_sha="$c_sha"
+          fi
+          break
+        done < <(printf '%s' "$entry" | jq -c '.persha[]' 2>/dev/null)
       fi
       if [ "$genuinely_red" -eq 1 ]; then
-        STILL_RED=$(printf '%s' "$STILL_RED" | jq -c --argjson e "$entry" '. + [$e]' 2>/dev/null)
+        STILL_RED=$(printf '%s' "$STILL_RED" | jq -c \
+          --arg cmd "$e_cmd" --arg why "$why" --arg sha "$red_sha" --argjson ex "$red_exit" \
+          '. + [{cmd:$cmd, why:$why, sha:$sha, exit:$ex}]' 2>/dev/null)
         [ -n "$STILL_RED" ] || STILL_RED="[]"
       fi
     done < <(printf '%s' "$RED" | jq -c '.[]' 2>/dev/null)
@@ -1544,7 +1718,7 @@ evaluate_vector() {
   fi
 
   if [ "$RED" != "[]" ]; then
-    SUMMARY=$(printf '%s' "$RED" | jq -r --arg head "$HEAD_SHA" 'map("  - `\(.cmd)` -> \(if .exit == null then "never ran (no ledger entry)" elif (.exit != 0) then "exit \(.exit)" else "STALE: last green was for commit \((.sha // "?")[0:12]), not HEAD \($head[0:12]) — re-run QA on the current commit" end)") | join("\n")' 2>/dev/null)
+    SUMMARY=$(printf '%s' "$RED" | jq -r --arg head "$HEAD_SHA" 'map("  - `\(.cmd)` -> \(if .why == "never" then "never ran (no ledger entry)" elif .why == "exit" then "exit \(.exit)" else "STALE: last green was for commit \((.sha // "?")[0:12]), not HEAD \($head[0:12]) — re-run QA on the current commit" end)") | join("\n")' 2>/dev/null)
     deny "$(printf 'MERGE GATE (REWORK): the verify chain is not green for the commit being merged. The following command(s) are red, never ran, or stale (proven against a different commit):\n%s\nFix the code and let QA re-prove the chain green (every command exit 0) ON THE CURRENT HEAD before merging.' "$SUMMARY")"
   fi
 
@@ -1628,6 +1802,13 @@ evaluate_vector() {
     fi
     # PLAN_COUNT == 0 -> no plan artifact at all -> skip, per the note above.
   fi
+
+  # Same binding as the PREAMBLE applies here: a plan whose approved base is
+  # provably not an ancestor of the commit being merged is another task's
+  # contract, and checking this diff against its lanes would reject clean work.
+  # Re-asserted rather than assumed, because GATE 5 can select a DIFFERENT file
+  # than the preamble did (it refuses the loose `ls | head -n1` fallback).
+  [ -n "$PLAN5" ] && deny_if_plan_is_foreign "$PLAN5"
 
   if [ -n "$PLAN5" ] && [ -f "$PLAN5" ]; then
     # Does this plan carry an ownership contract at all?

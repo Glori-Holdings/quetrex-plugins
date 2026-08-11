@@ -1600,6 +1600,40 @@ evaluate_vector() {
         | jq -c 'if (.verify | type) == "array" and (.verify | length) > 0 then .verify else empty end' 2>/dev/null)
     fi
   fi
+  # --- LOWER BOUND: a PR may ADD requirements, never DELETE them -------------
+  # Reading the chain from the merged commit alone let a PR de-gate ITSELF: shrink
+  # its own .quetrex/verify.json and the removed command stops being required,
+  # while every remaining command is green — so a measurably red suite reaches the
+  # base branch with the gate satisfied. Reproduced: the pre-fix hook ALLOWS a
+  # branch whose `npm test` exits 1 once `npm test` is dropped from verify[].
+  #
+  # This needs no adversary. /quetrex:init regenerating a shorter chain silently
+  # de-gates the repo, which is the same silent-unarming class the audit found in
+  # init's swallowed `git add`.
+  #
+  # So the effective chain is the UNION of the base's chain and the head's. Adding
+  # a command still tightens the gate immediately; removing one cannot loosen it
+  # within the PR that removes it. Renaming a command is therefore additive too —
+  # the old name must still be proven for this commit, which is the conservative
+  # reading at a ship boundary.
+  if [ -n "$CHAIN_JSON" ]; then
+    BASE_REF_FOR_CHAIN="${DIFF_BASE:-}"
+    [ -n "$BASE_REF_FOR_CHAIN" ] || BASE_REF_FOR_CHAIN="$(git -C "$ROOT" symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null || echo main)"
+    BASE_VERIFY_JSON=$(git -C "$ROOT" show "$BASE_REF_FOR_CHAIN:.quetrex/verify.json" 2>/dev/null)
+    if [ -n "$BASE_VERIFY_JSON" ]; then
+      BASE_CHAIN_JSON=$(printf '%s' "$BASE_VERIFY_JSON" \
+        | jq -c 'if (.verify | type) == "array" and (.verify | length) > 0 then .verify else empty end' 2>/dev/null)
+      if [ -n "$BASE_CHAIN_JSON" ]; then
+        MERGED_CHAIN=$(jq -cn --argjson a "$BASE_CHAIN_JSON" --argjson b "$CHAIN_JSON" \
+          '($a + $b) | unique' 2>/dev/null)
+        # Only widen. A jq failure must never silently shrink the chain.
+        if [ -n "$MERGED_CHAIN" ] && [ "$MERGED_CHAIN" != "null" ]; then
+          CHAIN_JSON="$MERGED_CHAIN"
+        fi
+      fi
+    fi
+  fi
+
   if [ -z "$CHAIN_JSON" ]; then
     CHAIN_JSON=$(jq -c 'if (.verify | type) == "array" and (.verify | length) > 0 then .verify else empty end' "$QDIR/verify.json" 2>/dev/null)
   fi

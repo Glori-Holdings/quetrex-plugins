@@ -1,6 +1,6 @@
 {
   "name": "quetrex-factory",
-  "version": "1.5.1",
+  "version": "1.6.0",
   "description": "Stack-agnostic agent engine for Claude Code: an architect → developer → QA → reviewer → security-reviewer → git-workflow pipeline with deterministic hooks that make \"done\" impossible while typecheck, lint, build, or tests are red. Guards, right-size routing, and merge gating are enforced by on-disk artifacts and PreToolUse/Stop hooks, never by agent prose.",
   "author": {
     "name": "Glori Holdings"

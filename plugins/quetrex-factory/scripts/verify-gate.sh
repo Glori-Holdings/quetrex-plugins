@@ -139,7 +139,7 @@
 #      presence means the command would have had the value).
 # If the committed verify.json cannot be read at all (no HEAD, unreadable),
 # NOTHING is treated as declared and no command is ever skipped.
-# A skip writes NO ledger line for that command (it is not a pass), and a run
+# A skip writes a ledger line marked skipped:true / skipReason:requiredEnv / exit:null for that command (it is recorded, and it is not a pass), and a run
 # that skipped anything must NOT clear a prior .quetrex/ESCALATION — only a run
 # where every chain command genuinely executed and exited 0 may clear one.
 
@@ -532,6 +532,31 @@ for cmd in "${CHAIN[@]}"; do
     SKIP_LINES="${SKIP_LINES}VERIFY SKIPPED: \`${cmd}\` not run in ${ROOT} — required env var ${MISSING_ENV_VAR} is unavailable in this checkout (declared in .env.example, unset here). BLOCKS nothing; the command is never proven and never counted as a pass.
 "
     SKIPPED_CMDS="${SKIPPED_CMDS:+$SKIPPED_CMDS, }\`${cmd}\`"
+    # RECORD THE SKIP IN THE LEDGER. This `continue` used to return before the ledger
+    # append below, so a declared-env skip left NO entry at all — and merge-gate's GATE 3
+    # requires an entry per chain command, reading absence as "never ran, deny". The two
+    # hooks therefore disagreed about what a sanctioned skip means: this one says "BLOCKS
+    # nothing", that one says "unprovable". Measured consequence in quetrex-demo, whose
+    # verify.json declares DEMO_DATABASE_URL for `npm run build`: with the var unset, that
+    # command was unprovable FOREVER, so no PR in the repo could pass GATE 3 — every
+    # ledger in its history carries lint and test and never build.
+    #
+    # The skip is a legitimate, human-confirmed state (the requiredEnv map is committed and
+    # `/quetrex:init` only writes it after an explicit confirmation), so it belongs in the
+    # evidence rather than in a log nobody parses. It is recorded as skipped — NOT as
+    # exit 0 — so nothing can mistake it for a pass: `exit` stays null and `skipped` is
+    # true. merge-gate decides what a skip is worth; this hook's job is to state it.
+    if [ -n "${LEDGER:-}" ] && [ -n "${HEAD_SHA:-}" ]; then
+      # jq, not node, and NOT swallowed. Every other ledger append in this file uses jq, and
+      # should_skip_for_env has already proven jq present to read requiredEnv at all. A
+      # `node -e ... || true` here vanished silently in an armed repo without node — and the
+      # skip entry vanishing is exactly the deadlock this change exists to close.
+      jq -cn \
+        --arg ts "$ts" --arg cmd "$cmd" --arg cwd "$ROOT" \
+        --arg sha "$HEAD_SHA" --arg v "$MISSING_ENV_VAR" \
+        '{ts:$ts,cmd:$cmd,cwd:$cwd,sha:$sha,exit:null,skipped:true,skipReason:"requiredEnv",missingEnv:$v,tail:("SKIPPED: required env var "+$v+" is unavailable in this checkout")}' \
+        >> "$LEDGER"
+    fi
     continue
   fi
   now=$(date +%s)

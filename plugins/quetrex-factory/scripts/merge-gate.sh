@@ -1690,10 +1690,50 @@ evaluate_vector() {
     . as $all
     | [ $chain[]
         | . as $c
-        | ( [ $all[] | select(.cmd == $c) | {sha: (.sha // ""), exit: .exit} ] ) as $ent
-        | ( [ $ent[] | select(.sha == $head and $head != "") ] | last ) as $athead
-        | ( reduce ($ent | reverse)[] as $e ({};
-              if has($e.sha) then . else .[$e.sha] = $e end) | [ .[] ] ) as $persha
+        | ( [ $all[] | select(.cmd == $c) | {sha: (.sha // ""), rawexit: .exit, skipped: ((.skipped == true) and (.skipReason == "requiredEnv"))} ] ) as $raw
+        # A DESCRIBING RED DOMINATES A LATER SKIP AT THE SAME SHA. `athead` takes the LAST
+        # entry at $head, so mapping a skip to exit 0 before that selection let a skip appended
+        # AFTER a genuine failure at the SAME commit erase it — a command that measurably
+        # exited non-zero on the merged commit passed the gate. Reproduced with the real hooks:
+        # red run, then the operator clears the env value, then one Stop firing appends the
+        # skip. That is the same shape as the transported-evidence shadowing already documented
+        # above, and it breaks the invariant this gate states about itself: a red for the merged
+        # commit is never rescued. So: if a SKIP shares a sha with a genuine non-skipped
+        # failure, that skip stays red no matter what follows it. A non-skipped entry is always
+        # real evidence from an actual run — it is NEVER overridden by another shas history, or
+        # this gate would deny every future genuine green for a command that failed even once
+        # anywhere in the ledger (reproduced: red exit 1, then a genuine re-run at the SAME sha
+        # exits 0 — that second run is real proof and must not be buried).
+        | ( [ $raw[] | select((.skipped | not) and .rawexit != null and .rawexit != 0) | .sha ] | unique ) as $redshas
+        | ( [ $raw[] | . as $e | {sha: $e.sha, exit: (if $e.skipped then (if ($redshas | index($e.sha)) then 1 else 0 end) else $e.rawexit end), skipped: $e.skipped} ] ) as $ent
+        # ONLY A CLEAN SKIP AT $head DEFERS TO THE WALK. If any sha carries a genuine failure,
+        # a CLEAN skip at $head (one whose own sha carries no failure, so $ent left its exit at
+        # 0) cannot stand in as the describing answer — otherwise a red at an artifact-only-range
+        # ANCESTOR (which GATE 3 treats as describing) is shadowed entirely and never reaches the
+        # bash walk below that would consult it. Leaving $athead null hands the decision to that
+        # walk, which owns the ancestor rule; it does NOT deny by itself. With no red anywhere, a
+        # clean skip still answers directly. But a skip whose own sha DOES carry a failure was
+        # already dominance-forced to exit 1 by $ent above — that is real, already-decided
+        # evidence, and must never be nulled away: doing so discarded the ONLY trace of a red at
+        # $head itself (reproduced: green at a describing ancestor, red at $head, then a skip
+        # ALSO at $head — the null here threw the red away and the merge shipped it).
+        | ( ( [ $ent[] | select(.sha == $head and $head != "") ] | last ) as $last
+            | if ($last != null and $last.skipped and $last.exit == 0 and ($redshas | length) > 0) then null else $last end ) as $athead
+        # THE WALKS OWN CANDIDATE LIST MUST HONOR THE SAME DEFERRAL — AND NO MORE. Nulling
+        # $athead above sends the decision to the bash walk below, which picks the FIRST persha
+        # candidate connected to $head by an artifact-only range and stops there. But $head
+        # trivially satisfies that check against itself (an empty range is vacuously
+        # artifact-only), so if $head own CLEAN skip entry were still in $persha, the walk would
+        # immediately re-accept the very skip $athead just refused to trust — never reaching the
+        # ancestor red that $athead-nulling exists to surface. So: whenever a genuine red exists
+        # anywhere for this command, drop only CLEAN skip entries (skipped AND exit 0) from
+        # $persha; a skip already dominance-forced to exit 1 IS the red evidence for its sha (not
+        # a mask over it) and dropping it too would erase that sha from $persha entirely, hiding
+        # a genuine failure behind a stale, unrelated, older describing green — the same defect
+        # one level removed, for any sha, not only $head.
+        | ( ( reduce ($ent | reverse)[] as $e ({};
+              if has($e.sha) then . else .[$e.sha] = $e end) | [ .[] ] )
+            | if ($redshas | length) > 0 then [ .[] | select((.skipped | not) or .exit != 0) ] else . end ) as $persha
         | { cmd: $c, athead: $athead, persha: $persha }
         | select(.athead == null or .athead.exit != 0) ]
   ' "$LEDGER" 2>/dev/null)
@@ -1752,7 +1792,12 @@ evaluate_vector() {
   fi
 
   if [ "$RED" != "[]" ]; then
-    SUMMARY=$(printf '%s' "$RED" | jq -r --arg head "$HEAD_SHA" 'map("  - `\(.cmd)` -> \(if .why == "never" then "never ran (no ledger entry)" elif .why == "exit" then "exit \(.exit)" else "STALE: last green was for commit \((.sha // "?")[0:12]), not HEAD \($head[0:12]) — re-run QA on the current commit" end)") | join("\n")' 2>/dev/null)
+    # The "stale" branch's `.sha` is whatever ledger entry happened to be most recent for that
+    # command — it is NOT necessarily a green run (it could be an unconnected red, or a clean
+    # skip for an unrelated commit): "stale" only ever means no recorded entry, of ANY kind,
+    # connects to HEAD by an artifact-only range. Saying "last green" here asserted a fact this
+    # branch never checked; the honest claim is only that nothing on record describes HEAD.
+    SUMMARY=$(printf '%s' "$RED" | jq -r --arg head "$HEAD_SHA" 'map("  - `\(.cmd)` -> \(if .why == "never" then "never ran (no ledger entry)" elif .why == "exit" then "exit \(.exit)" else "STALE: no recorded result for commit \($head[0:12]) or an artifact-only-range ancestor of it (nearest evidence: commit \((.sha // "?")[0:12])) — re-run QA on the current commit" end)") | join("\n")' 2>/dev/null)
     deny "$(printf 'MERGE GATE (REWORK): the verify chain is not green for the commit being merged. The following command(s) are red, never ran, or stale (proven against a different commit):\n%s\nFix the code and let QA re-prove the chain green (every command exit 0) ON THE CURRENT HEAD before merging.' "$SUMMARY")"
   fi
 

@@ -1624,8 +1624,38 @@ evaluate_vector() {
       BASE_CHAIN_JSON=$(printf '%s' "$BASE_VERIFY_JSON" \
         | jq -c 'if (.verify | type) == "array" and (.verify | length) > 0 then .verify else empty end' 2>/dev/null)
       if [ -n "$BASE_CHAIN_JSON" ]; then
-        MERGED_CHAIN=$(jq -cn --argjson a "$BASE_CHAIN_JSON" --argjson b "$CHAIN_JSON" \
-          '($a + $b) | unique' 2>/dev/null)
+        # --- ESCAPE HATCH: a chain EDIT the review-gate explicitly signed off ---
+        # The union above makes a RENAME additive: the old command string must
+        # still be proven green for the commit that replaces it. That is the
+        # right call for a silent shrink, but it DEADLOCKS the legitimate case --
+        # editing a command precisely BECAUSE it is broken. The old form can
+        # never go green, so the fix to it can never merge. Reproduced live:
+        # glori-evangelists #87, where the chain's pytest step could not pass
+        # locally until it set DATABASE_URL, and the gate demanded the pre-fix
+        # form be proven green at the very commit that fixed it.
+        #
+        # A base-only command is dropped from the requirement ONLY when
+        # review-verdict.json names that exact command string AND pins the
+        # acknowledgement to THIS head sha. /quetrex:init regenerating a shorter
+        # chain, or an adversarial shrink, carries no such entry and is still
+        # blocked -- de-gating now costs a reviewer naming the command, by hand,
+        # at this commit. Subtraction applies to the BASE chain only: if head
+        # still lists the command it stays required no matter what the verdict
+        # claims.
+        ACKED_DROPS='[]'
+        if [ -f "$RV" ]; then
+          _acked=$(jq -c --arg head "$HEAD_SHA" '
+            if (.verify_chain_change.reviewed == true)
+               and (.verify_chain_change.sha == $head)
+               and ((.verify_chain_change.removed_commands | type) == "array")
+            then (.verify_chain_change.removed_commands | map(select(type == "string")))
+            else [] end' "$RV" 2>/dev/null)
+          if [ -n "$_acked" ] && [ "$_acked" != "null" ]; then
+            ACKED_DROPS="$_acked"
+          fi
+        fi
+        MERGED_CHAIN=$(jq -cn --argjson a "$BASE_CHAIN_JSON" --argjson b "$CHAIN_JSON" --argjson d "$ACKED_DROPS" \
+          '(($a - $d) + $b) | unique' 2>/dev/null)
         # Only widen. A jq failure must never silently shrink the chain.
         if [ -n "$MERGED_CHAIN" ] && [ "$MERGED_CHAIN" != "null" ]; then
           CHAIN_JSON="$MERGED_CHAIN"

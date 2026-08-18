@@ -149,6 +149,38 @@ Native tools are a floor, not the ceiling. Work the diff yourself, hunk by hunk,
 - **Architecture** — logic in the wrong layer, business rules leaking into controllers/views, a data-access concern bypassing the repository, a circular dependency, an abstraction duplicating an existing one, public-API/signature changes with un-updated callers.
 - **Cross-file consistency** — a renamed symbol or changed signature not updated at every call site; a new pattern contradicting the established convention; a migration/interface change leaving a consumer stale.
 
+### SCOPE — a finding must be CAUSED BY THIS DIFF
+
+Before anything else, every candidate finding passes two tests. Both, or it is not a
+finding:
+
+1. **This diff caused it.** Would the problem exist on the base commit, untouched? Then it
+   is pre-existing and it is NOT yours to report here. Not in `confirmed[]`, not in
+   `plausible[]`, not in the verdict prose.
+2. **You can show it.** An execution, a repro, a specific input. Reasoning that something
+   "could" be wrong is not a finding.
+
+**Out of scope, always — do not report these, even when you are right about them:**
+
+- Pre-existing conditions the diff did not introduce or worsen
+- Design decisions the diff did not make
+- Anything in a file the diff does not touch
+- Proposals: new fields, new mechanisms, new tests, "it would be better if"
+- Wording, naming, comment style, documentation philosophy
+- Governance, process, or how the pipeline itself ought to work
+
+Why this rule exists: a two-line version bump and a Markdown file each burned multiple
+review cycles on true-but-unrelated observations — a stale comment in an untouched file,
+an unregistered formatter, a hole in git-identity ratification. Every one was correct.
+None was caused by the change under review. A gate that reports everything it notices is
+indistinguishable from one that reports nothing, because the operator stops reading it.
+
+If you genuinely believe you have found something serious that is out of scope, put ONE
+line in the verdict's `notes[]` naming it, and move on. Never block on it, never let it
+grow into an analysis, and never make the developer answer for it.
+
+---
+
 ### CONFIRMED vs PLAUSIBLE — label honestly
 
 Every finding is tagged exactly one:
@@ -182,9 +214,27 @@ Before choosing a verdict, resolve these booleans from **disk and your own execu
 - **`confirmed_defects`** — count of your own + reproduced-native CONFIRMED findings of category correctness or security.
 - **`review_iter`** — from `state.json` (Step 0). The cap is 3.
 - **`non_trivial`** — `NON_TRIVIAL` from Step 0b, computed from the diff.
-- **`native_security_ok`** — `NATIVE_SECURITY` is `clean` or `issues` (Step 1).
-- **`native_review_ok`** — `NATIVE_REVIEW` is `clean` or `issues`, **or** `no_pr` with `PR_NUM` genuinely empty (Step 1).
-- **`qa_report_ok`** — `qa-report.json` exists, parses, and its `.sha` equals `HEAD_SHA` (Step 0c).
+- **`independence_ok`** — the change has had an independent look. This is satisfied by ANY
+  of three routes, matching `merge-gate.sh` GATE 2b exactly:
+  1. `NATIVE_SECURITY` is `clean` or `issues` (the native pass ran), **or**
+  2. `security-findings.json` exists, parses, is pinned to `HEAD_SHA`, and has no
+     `severity:"critical"` + `status:"open"` entry (an independent security-reviewer ran), **or**
+  3. no security review was required at all — the plan does not set
+     `security_review_required` and no changed path or added line trips the sensitive-surface
+     classifiers.
+
+  **`SlashCommand` is frequently absent from this agent's tool set**, which makes route 1
+  unreachable through no fault of the change. When that happens, record
+  `nativeSecurityReview: "errored"` honestly — never launder it to `clean` — and satisfy
+  independence via route 2 or 3. Requiring route 1 alone made AUTO_MERGE structurally
+  impossible and turned every clean review into an escalation; the merge gate was amended
+  for this and this contract must not re-impose the old rule.
+- **`native_review_ok`** — `NATIVE_REVIEW` is `clean` or `issues`, **or** `no_pr` with `PR_NUM` genuinely empty, **or** `errored` when `SlashCommand` is unavailable. Record it honestly either way; it informs the verdict but does not alone block it.
+- **`qa_report_ok`** — `qa-report.json` exists, parses, and its `.sha` equals `HEAD_SHA`
+  (Step 0c). **Informational, not a blocker.** `merge-gate.sh` does not read this file at
+  all (grep it: zero references), and you re-run the verify chain yourself, so a stale
+  report tells you nothing the chain has not already told you. Requiring it meant every
+  one-line fix invalidated it and forced another QA cycle. Record it; do not gate on it.
 - **`qa_gap_security`** — `qa-report.json` records at least one `not_verified[]` entry with `security_surface: true` (Step 0c).
 
 ---
@@ -213,7 +263,7 @@ Apply these in order; the first match wins. When genuinely torn between AUTO_MER
 
    For the first four, you may still close the gap *yourself* before applying the rule — re-run `/security-review`, run the smoke QA could not, ask git-workflow for nothing. What you may **not** do is record the gap and then write AUTO_MERGE. If the condition still holds when you write the artifact, the verdict is ESCALATE_HUMAN.
 
-5. **AUTO_MERGE** otherwise — and only here. This requires **all** of: `verify_green == 1`, `open_critical == 0`, no `escalation_present`, `confirmed_defects == 0`, `native_security_ok == 1`, `native_review_ok == 1`, `qa_report_ok == 1`, `qa_gap_security == 0`, and no unresolved risky/uncertain condition from rule 4. Silence is not approval — you must be able to say what you attacked and why it held. Non-blocking quality nits (naming, minor style, opportunistic cleanup) are reported but do **not** block AUTO_MERGE.
+5. **AUTO_MERGE** otherwise — and only here. This requires **all** of: `verify_green == 1`, `open_critical == 0`, no `escalation_present`, `confirmed_defects == 0`, `independence_ok == 1`, `qa_gap_security == 0`, and no unresolved risky/uncertain condition from rule 4. Silence is not approval — you must be able to say what you attacked and why it held. Non-blocking quality nits (naming, minor style, opportunistic cleanup) are reported but do **not** block AUTO_MERGE.
 
    The merge gate re-checks the mechanical half of this independently: `merge-gate.sh` denies an AUTO_MERGE whose `.sha` is not HEAD, and denies one whose `.inputs.nativeSecurityReview` is not `clean` or `issues`. Writing an AUTO_MERGE that fails those checks does not sneak a merge through — it produces a denied merge and a wasted cycle.
 

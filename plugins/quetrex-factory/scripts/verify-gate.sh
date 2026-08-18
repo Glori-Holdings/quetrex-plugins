@@ -181,13 +181,19 @@ ESCALATION="$QDIR/ESCALATION"
 HEAD_SHA=$(git -C "$ROOT" rev-parse HEAD 2>/dev/null)
 CUR_BRANCH=$(git -C "$ROOT" branch --show-current 2>/dev/null)
 
-# On SubagentStop we may run a QUICK subset chain if the project defines one.
-# QUICK_NOTE is set when a declared verifyQuick was REJECTED for not being a
-# subset of verify[]; it is appended to any block reason so the operator sees
-# why the full chain ran.
+# On Stop AND SubagentStop we run the QUICK subset chain when the project
+# defines one. QUICK_NOTE is set when a declared verifyQuick was REJECTED for
+# not being a subset of verify[]; it is appended to any block reason.
+#
+# WHY STOP USES IT TOO (2026-08-18). No fast-skip means this fires after every
+# turn, including pure conversation: full chain 133s vs quick 0.9s here. NOTHING
+# IS SKIPPED — a real chain runs every turn, so there is no "already verified"
+# record for the gated agent to forge. Shipping is still decided by the FULL
+# chain: merge-gate GATE 3 refuses any merge without a green full-chain ledger
+# pinned to HEAD. Trade: a broken test surfaces at the merge boundary.
 QUICK=0
 QUICK_NOTE=""
-[ "$EVENT" = "SubagentStop" ] && QUICK=1
+case "$EVENT" in Stop|SubagentStop) QUICK=1 ;; esac
 
 # --- fail-closed time budget -------------------------------------------------
 # The chain below runs synchronously inside a Stop (900s) / SubagentStop

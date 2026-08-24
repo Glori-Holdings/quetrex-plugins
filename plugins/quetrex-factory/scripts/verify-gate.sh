@@ -142,6 +142,10 @@
 # A skip writes a ledger line marked skipped:true / skipReason:requiredEnv / exit:null for that command (it is recorded, and it is not a pass), and a run
 # that skipped anything must NOT clear a prior .quetrex/ESCALATION — only a run
 # where every chain command genuinely executed and exited 0 may clear one.
+#
+# AMENDMENT (operator-approved, 2026-08-21, HOOKFIX): "no fast-skip" narrows to
+# "no SKIP" — Stop/SubagentStop runs a BOUNDED QUICK chain under a wall-clock
+# cap instead (see the heavy-filter/cap/QUETREX_VERIFY_FULL comments below).
 
 set -uo pipefail
 
@@ -195,6 +199,8 @@ QUICK=0
 QUICK_NOTE=""
 case "$EVENT" in Stop|SubagentStop) QUICK=1 ;; esac
 
+[ "${QUETREX_VERIFY_FULL:-}" = "1" ] && QUICK=0  # widen-only: pre-change FULL chain
+
 # --- fail-closed time budget -------------------------------------------------
 # The chain below runs synchronously inside a Stop (900s) / SubagentStop
 # (600s) hook timeout (wired in quetrex-install-project-gates.sh). If the
@@ -211,6 +217,26 @@ BUDGET_DEFAULT=840
 BUDGET_TOTAL="${QUETREX_VERIFY_BUDGET:-$BUDGET_DEFAULT}"
 case "$BUDGET_TOTAL" in ''|*[!0-9]*) BUDGET_TOTAL="$BUDGET_DEFAULT" ;; esac
 [ "$BUDGET_TOTAL" -gt 0 ] 2>/dev/null || BUDGET_TOTAL="$BUDGET_DEFAULT"
+
+# Sourced-only helper (bounded quick-chain machinery: the cap, the
+# declarative env-skip, the heavy-command filter) — see its own header for
+# why it is a separate file. Never invoked directly.
+# SEC-8 FAIL-CLOSED: if the helper is missing/unreadable, `source` fails but
+# (with no `set -e`) the script would otherwise CONTINUE past it -- every
+# later call to an undefined function (should_skip_for_env, in the run loop,
+# once per command) would then print a raw "command not found" interpreter
+# line to the operator on every single command, and the requiredEnv skip and
+# heavy filter would both silently stop functioning. A missing dependency of
+# the gate is a genuine failure, not something to run past: block once, with
+# one labelled line, never a raw stack trace.
+QX_HELPER="$(dirname "${BASH_SOURCE[0]}")/verify-gate-quick-chain.sh"
+# shellcheck source=verify-gate-quick-chain.sh
+if ! source "$QX_HELPER" 2>/dev/null || ! command -v qx_apply_quick_cap >/dev/null 2>&1; then
+  printf 'VERIFY GATE MISCONFIGURED: required helper %s is missing or failed to load — refusing to run unverified. Reinstall/republish the plugin.
+' "$QX_HELPER" >&2
+  exit 2
+fi
+qx_apply_quick_cap
 
 # --- helpers ---------------------------------------------------------------
 
@@ -280,7 +306,7 @@ resolve_from_verify_json() {
         ' "$f" 2>/dev/null)
       # Kept to a single line (no embedded newlines) so it can be appended to
       # a block reason without breaking the <=3-line quiet-output budget.
-      QUICK_NOTE=$(printf ' NOTE: verifyQuick in verify.json is not a subset of verify (offending: %s); ran the FULL verify chain instead.' \
+      QUICK_NOTE=$(printf ' NOTE: verifyQuick in verify.json is not a subset of verify (offending: %s); ran the bounded quick chain derived from verify[] instead.' \
         "${foreign:-<unparseable>}")
     fi
   fi
@@ -369,6 +395,15 @@ resolve_from_verify_json || resolve_from_claude_md || resolve_autodetect || {
 
 mkdir -p "$QDIR"
 
+# DECLARATIVE ENV SKIP (should_skip_for_env) and the heavy-command filter
+# (qx_filter_heavy_chain) are defined in verify-gate-quick-chain.sh, sourced
+# above — see that file for the full, unabridged contract (SEC-2, the three
+# skip constraints, the CORRECTED empty-filter fallback). Order matters: the
+# filter must run AFTER should_skip_for_env is defined (it calls it) and
+# BEFORE the run loop below (which also calls should_skip_for_env, per
+# command, to actually record the skip).
+qx_filter_heavy_chain
+
 # --- full-output log (QUIET fix part a) -------------------------------------
 # Every command's FULL captured stdout+stderr is written here, never into the
 # block reason. Recreated fresh each run so it always reflects THIS attempt.
@@ -390,98 +425,6 @@ fi
 ( umask 077; : > "$LOG" ) 2>/dev/null
 chmod 600 "$LOG" 2>/dev/null
 
-# --- DECLARATIVE ENV SKIP (fix part c) --------------------------------------
-# Pre-flight only — NEVER inferred from a command's output. Returns 0 (skip)
-# and sets MISSING_ENV_VAR when `cmd` has a requiredEnv entry in verify.json
-# and every constraint in the header comment is satisfied; returns 1 (run it)
-# otherwise, which is the fail-closed default for anything ambiguous.
-MISSING_ENV_VAR=""
-should_skip_for_env() {
-  local cmd="$1"
-  MISSING_ENV_VAR=""
-  command -v jq >/dev/null 2>&1 || return 1
-  # EMPTY-HEAD TRAP (SEC-2): empty $HEAD_SHA would degrade the show below to
-  # `git show ":path"` (reads the INDEX, fail-OPEN). Return before any show.
-  [ -n "$HEAD_SHA" ] || return 1
-  # The ENTIRE requiredEnv mapping is read from the COMMITTED verify.json blob
-  # at the PINNED $HEAD_SHA (SEC-2), never the working tree nor a freshly
-  # re-resolved `HEAD`. Fail closed if it cannot be read at all.
-  local committed_verify_json
-  committed_verify_json=$(git -C "$ROOT" show "$HEAD_SHA:.quetrex/verify.json" 2>/dev/null) || return 1
-  [ -n "$committed_verify_json" ] || return 1
-  # Constraint 1: `cmd` must be a byte-for-byte member of the COMMITTED
-  # verify[] ARRAY (type ASSERTED, not assumed: when `.verify` is a STRING,
-  # jq's `index()` degrades to a SUBSTRING search, so a command that merely
-  # CONTAINS `cmd` as a substring would incorrectly satisfy this check — see
-  # ADV-D) AND the committed requiredEnv must declare vars for that exact
-  # key. A foreign/typo'd requiredEnv key that happens not to equal any
-  # verify[] entry simply cannot skip anything.
-  printf '%s' "$committed_verify_json" | jq -e --arg c "$cmd" \
-    '(.verify // []) as $v | ($v | type) == "array" and (($v | index($c)) != null)' \
-    >/dev/null 2>&1 || return 1
-  local vars
-  vars=$(printf '%s' "$committed_verify_json" | jq -r --arg c "$cmd" '
-      if (.requiredEnv // {}) | type == "object"
-      then (.requiredEnv[$c] // []) | if type == "array" then .[] else empty end
-      else empty end
-    ' 2>/dev/null)
-  [ -n "$vars" ] || return 1
-  local v declared exfile committed
-  while IFS= read -r v; do
-    [ -n "$v" ] || continue
-    # Only ever treat well-formed shell identifiers as candidates; anything
-    # else cannot be safely looked up and must never authorize a skip.
-    case "$v" in
-      [A-Za-z_]*) : ;;
-      *) continue ;;
-    esac
-    case "$v" in *[!A-Za-z0-9_]*) continue ;; esac
-    # Constraint 2: the repo itself must declare this as required config, and
-    # that DECLARATION must be visible in a reviewed diff — per security_surface
-    # constraint #2. Two escapes closed here:
-    #   - a plain existence/grep check on disk is not enough (an UNTRACKED
-    #     .env.example is invisible to any reviewer), so tracking is required; and
-    #   - checking that the PATH is tracked is not enough either (a tracked file
-    #     can still carry an UNCOMMITTED working-tree edit that grep would read
-    #     straight off disk — `git ls-files` only proves the PATH is tracked,
-    #     not that THIS line is). So the declaring line must be read from the
-    #     COMMITTED blob at HEAD, never the live working-tree file. Only HEAD
-    #     counts, not the staged index: a staged-but-uncommitted change still
-    #     appears in no reviewed diff (nothing has been committed for a
-    #     reviewer to see), so `git show :file` is deliberately NOT used here.
-    #     Fail CLOSED: if the committed blob cannot be read at all (no HEAD,
-    #     file absent at HEAD, git error), it does not count as declared.
-    #     Read at the PINNED $HEAD_SHA (SEC-2), never a fresh `HEAD`.
-    declared=0
-    for exfile in .env.example .env.sample; do
-      committed=$(git -C "$ROOT" show "$HEAD_SHA:$exfile" 2>/dev/null) || continue
-      if printf '%s\n' "$committed" | grep -qE "^${v}="; then
-        declared=1
-        break
-      fi
-    done
-    [ "$declared" -eq 1 ] || continue
-    # Constraint 3a: unset-or-empty in the hook's own environment.
-    local val="${!v-}"
-    [ -z "$val" ] || continue
-    # Constraint 3b: not a key in any local dotenv file that would be loaded
-    # at runtime (their presence means the command would have had the value).
-    local envfile skip_this=0
-    for envfile in "$ROOT/.env" "$ROOT/.env.local" "$ROOT/.env.development" "$ROOT/.env.test"; do
-      if [ -f "$envfile" ] && grep -qE "^${v}=" "$envfile" 2>/dev/null; then
-        skip_this=1
-        break
-      fi
-    done
-    [ "$skip_this" -eq 0 ] || continue
-    MISSING_ENV_VAR="$v"
-    return 0
-  done <<EOF
-$vars
-EOF
-  return 1
-}
-
 # --- run the chain ---------------------------------------------------------
 # Always run — no fast-skip, no stale-green. Every non-zero exit is RED. There
 # is no env-error laundering: a command that exits non-zero fails the gate even
@@ -496,6 +439,8 @@ FAILED_CMD=""
 FAILED_TAIL=""
 FAILED_CODE=0
 TIMED_OUT=0
+CAP_HIT=0   # QUICK-path cap cut a command short (bounded fail-OPEN, not a green)
+CAP_CMD=""
 
 # Run a single command under a wall-clock cap so a hang cannot silently burn
 # through the external hook timeout. Prefers GNU `timeout`/`gtimeout`; if
@@ -527,7 +472,8 @@ run_with_cap() {
 
 BUDGET_START=$(date +%s)
 
-for cmd in "${CHAIN[@]}"; do
+for ((CHAIN_IDX=0; CHAIN_IDX<${#CHAIN[@]}; CHAIN_IDX++)); do
+  cmd="${CHAIN[$CHAIN_IDX]}"
   if should_skip_for_env "$cmd"; then
     ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
     {
@@ -568,21 +514,32 @@ for cmd in "${CHAIN[@]}"; do
   now=$(date +%s)
   remaining=$((BUDGET_TOTAL - (now - BUDGET_START)))
   if [ "$remaining" -le 0 ]; then
-    # The budget was already exhausted by prior commands in this chain -> the
-    # gate fails CLOSED rather than skipping the rest of the chain unproven.
-    code=124
-    out="TIMEOUT: the ${BUDGET_TOTAL}s verification time budget (QUETREX_VERIFY_BUDGET) was exhausted before this command could run."
-    TIMED_OUT=1
+    code=124; TIMED_OUT=1
+    out="TIME BUDGET EXHAUSTED (${BUDGET_TOTAL}s) before this command could run."
   else
+    # SEC-2 FIX: TIMED_OUT must be determined from MEASURED ELAPSED TIME
+    # against the cap, never from exit code alone. A command that itself
+    # genuinely exits 124/137 (e.g. its own internal `timeout N cmd`, or a
+    # self-directed kill) in well under its cap window is a REAL failure —
+    # inferring "our watchdog fired" from the bare exit code alone silently
+    # laundered exactly that into a CAP-ALLOW (fail-open) in the pre-fix
+    # code. Only when the ELAPSED wall-clock time is itself close to (within
+    # a small margin of) the cap actually granted is this attributable to
+    # OUR OWN timeout wrapper.
+    CMD_START=$(date +%s)
     run_with_cap "$cmd" "$remaining"
+    CMD_ELAPSED=$(( $(date +%s) - CMD_START ))
     code="$CMD_CODE"
     out="$CMD_OUT"
-    if [ "$code" -eq 124 ] || [ "$code" -eq 137 ]; then
+    CAP_MARGIN=2
+    CAP_FLOOR=$(( remaining > CAP_MARGIN ? remaining - CAP_MARGIN : 0 ))
+    if { [ "$code" -eq 124 ] || [ "$code" -eq 137 ]; } && [ "$CMD_ELAPSED" -ge "$CAP_FLOOR" ]; then
       TIMED_OUT=1
       out="${out}
-TIMEOUT: this command exceeded its ${remaining}s share of the ${BUDGET_TOTAL}s verification time budget (QUETREX_VERIFY_BUDGET) and was killed."
+TIME BUDGET EXHAUSTED: exceeded its ${remaining}s share of the ${BUDGET_TOTAL}s budget and was killed."
     fi
   fi
+
   ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   t20=$(tail20 "$out")
 
@@ -592,6 +549,30 @@ TIMEOUT: this command exceeded its ${remaining}s share of the ${BUDGET_TOTAL}s v
     printf '=== %s | cmd: %s | exit: %s | cwd: %s ===\n' "$ts" "$cmd" "$code" "$ROOT"
     printf '%s\n' "$out"
   } >> "$LOG" 2>/dev/null
+
+  # CAP-ALLOW: bounded fail-OPEN, QUICK only — NOT RED. SEC-1/SEC-3 FIX
+  # (2026-08-21): writes a boundedQuick SKIP ledger line for THIS cut
+  # command and every REMAINING, never-attempted command in the resolved
+  # chain — never NO line at all. Absence was indistinguishable from "never
+  # configured", which broke merge-gate's ledger-derived-chain fallback in
+  # both directions (a red suite could ship when no verify.json existed; a
+  # real chain could be denied forever once a command's only evidence
+  # vanished). A boundedQuick line is never proof; merge-gate.sh's own
+  # arbitration (out of this file's ownership) is what makes that true.
+  if [ "$TIMED_OUT" -eq 1 ] && [ "$QUICK" -eq 1 ]; then
+    CAP_HIT=1; CAP_CMD="$cmd"
+    # SEC-15 (LOW, security review 2026-08-21 — downgraded from an earlier
+    # ordering attempt that was CORRECTLY rejected as SEC-19): these
+    # boundedQuick lines are a plain, strict append, same as every other
+    # ledger write in this file — no read, no truncate, no reordering. The
+    # ledger's LAST line can therefore still be a boundedQuick skip even
+    # when an earlier command in this SAME run genuinely completed; that
+    # residual is accepted, open, LOW severity, per operator directive —
+    # append-only wins over exact tail-line ordering. See
+    # qx_write_bounded_skips_for_cap in verify-gate-quick-chain.sh.
+    qx_write_bounded_skips_for_cap "$CHAIN_IDX"
+    break
+  fi
 
   # Append to the append-only ledger (best-effort; failure to log never blocks).
   # `sha` pins this result to the exact commit it was proven against — the merge
@@ -631,6 +612,14 @@ TIMEOUT: this command exceeded its ${remaining}s share of the ${BUDGET_TOTAL}s v
 
   break
 done
+
+# CAP-ALLOW decision (checked first): never touches ATTEMPTS_FILE/ESCALATION.
+if [ "$CAP_HIT" -eq 1 ]; then
+  [ -n "$SKIP_LINES" ] && printf '%s' "$SKIP_LINES"
+  printf 'VERIFY QUICK-CAP: the %ss bounded quick-chain time budget (QUETREX_VERIFY_QUICK_CAP) was exhausted running `%s` in %s — allowed to finish; nothing green or red was recorded for it, and the FULL chain still gates shipping at the merge boundary (merge-gate.sh).\n' \
+    "$BUDGET_TOTAL" "$CAP_CMD" "$ROOT"
+  exit 0
+fi
 
 # --- decision --------------------------------------------------------------
 if [ "$RED" -eq 0 ]; then

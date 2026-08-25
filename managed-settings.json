@@ -87,14 +87,14 @@
     "Stop": [
       {
         "hooks": [
-          { "type": "command", "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/verify-gate.sh\"", "timeout": 600000 }
+          { "type": "command", "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/verify-gate.sh\"", "timeout": 900 }
         ]
       }
     ],
     "SubagentStop": [
       {
         "hooks": [
-          { "type": "command", "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/verify-gate.sh\"", "timeout": 600000 }
+          { "type": "command", "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/verify-gate.sh\"", "timeout": 900 }
         ]
       }
     ],
@@ -102,15 +102,15 @@
       {
         "matcher": "Bash",
         "hooks": [
-          { "type": "command", "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/deny-guard.sh\"", "timeout": 5000 },
-          { "type": "command", "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/secret-scan.sh\"", "timeout": 5000 },
-          { "type": "command", "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/merge-gate.sh\"", "timeout": 15000 }
+          { "type": "command", "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/deny-guard.sh\"", "timeout": 10 },
+          { "type": "command", "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/secret-scan.sh\"", "timeout": 10 },
+          { "type": "command", "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/merge-gate.sh\"", "timeout": 15 }
         ]
       },
       {
         "matcher": "Write|Edit",
         "hooks": [
-          { "type": "command", "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/secret-scan.sh\"", "timeout": 5000 }
+          { "type": "command", "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/secret-scan.sh\"", "timeout": 10 }
         ]
       }
     ]

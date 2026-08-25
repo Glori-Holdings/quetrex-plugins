@@ -2,10 +2,13 @@
 
 The private Claude Code plugin marketplace for the Quetrex engine.
 
-This repo hosts the **`quetrex-factory`** plugin — a stack-agnostic agent pipeline
-(architect → developer(s) → QA → preview+E2E → reviewer → git-workflow) whose
+This repo is the marketplace for the **`quetrex-factory`** plugin — a stack-agnostic agent
+pipeline (architect → developer(s) → QA → preview+E2E → reviewer → git-workflow) whose
 four pillars are guaranteed by **hooks and on-disk artifacts a hook reads**, never by an
-agent's prose:
+agent's prose. `quetrex-factory`'s source of truth (agents, hooks, scripts) lives in
+`Glori-Holdings/quetrex-base` at `plugins/quetrex-factory/`; this repo's
+`.claude-plugin/marketplace.json` sources it from there via a `git-subdir` reference so
+there is exactly one copy of the floor scripts, never a second one published here.
 
 - **Excellent code** — `verify-gate` (Stop + SubagentStop) binds "done" to the real exit
   codes of your project's verify chain. It blocks any finish while typecheck / lint /
@@ -306,11 +309,15 @@ runs the project's verify chain before the session is allowed to stop.
 ```
 .claude-plugin/marketplace.json   # marketplace manifest: name "quetrex", owner, plugins[]
 plugins/
-  quetrex-factory/                # stack-agnostic engine (agents, commands, hooks, scripts, skills, docs)
   quetrex-nextjs/                 # Next.js overlay on top of quetrex-factory
 README.md                         # this file
 ```
 
-The `quetrex` marketplace is defined by `.claude-plugin/marketplace.json`; each entry in
-its `plugins[]` array names a plugin, its `source` within this repo, and a `version`. A
+`quetrex-factory` itself does **not** live in this repo — it is sourced by
+`.claude-plugin/marketplace.json` straight from `Glori-Holdings/quetrex-base`'s
+`plugins/quetrex-factory/` via a `git-subdir` source, so the engine has exactly one copy
+(quetrex-base) rather than a synced duplicate here. The `quetrex` marketplace is defined
+by `.claude-plugin/marketplace.json`; each entry in its `plugins[]` array names a plugin,
+its `source` (a local path for the stack packs, a `git-subdir` reference into quetrex-base
+for `quetrex-factory`, and `github` for the top-level `quetrex` plugin), and a `version`. A
 project's `enabledPlugins` value of `quetrex-factory@quetrex` resolves through that manifest.

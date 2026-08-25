@@ -40,12 +40,17 @@
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-HOOK="${QX_MERGE_GATE_HOOK:-$REPO_ROOT/plugins/quetrex-factory/scripts/merge-gate.sh}"
+# quetrex-factory (and its scripts, including merge-gate.sh) no longer lives in this
+# repo — it is the ONE COPY owned by quetrex-base and sourced here by marketplace.json
+# via a git-subdir reference. Default to a sibling quetrex-base checkout; override with
+# QX_MERGE_GATE_HOOK to point at any other copy (e.g. to prove a fix against the
+# pre-change script, per this file's own header comment).
+HOOK="${QX_MERGE_GATE_HOOK:-$REPO_ROOT/../quetrex-base/plugins/quetrex-factory/scripts/merge-gate.sh}"
 GATE_PROFILE="${QX_MERGE_GATE_PROFILE:-full}"
 
 if [ ! -x "$HOOK" ] && [ ! -f "$HOOK" ]; then
-  echo "FAIL: hook not found at $HOOK"
-  exit 1
+  echo "SKIP: merge-gate.sh not found at $HOOK — quetrex-factory lives only in quetrex-base now; set QX_MERGE_GATE_HOOK to a checkout of it (e.g. a sibling ../quetrex-base clone) to run this suite"
+  exit 0
 fi
 if ! command -v jq >/dev/null 2>&1; then
   echo "SKIP: jq is not installed — merge-gate.sh is jq-mandatory, nothing to test"
@@ -57,8 +62,30 @@ pass() { printf 'ok - %s\n' "$1"; }
 fail() { printf 'NOT OK - %s\n' "$1"; FAIL=1; }
 
 FIXTURE="$(mktemp -d "${TMPDIR:-/tmp}/merge-gate-fixture.XXXXXX")"
-cleanup() { rm -rf "$FIXTURE"; }
+MOCKBIN="$(mktemp -d "${TMPDIR:-/tmp}/merge-gate-mockbin.XXXXXX")"
+cleanup() { rm -rf "$FIXTURE" "$MOCKBIN"; }
 trap cleanup EXIT
+
+# --- mock `gh` -- merge-gate.sh resolves the PR's real head/base via
+# `gh pr view [<id>] --json headRefOid,baseRefOid` rather than trusting local
+# git state (quetrex-base's Blocker-1 fix). Prepended onto PATH for every hook
+# invocation so this suite never depends on a real `gh` being
+# installed/authenticated. See quetrex-base's test/merge-gate.test.sh, which
+# this mock is ported from verbatim, for the full rationale.
+cat > "$MOCKBIN/gh" <<'MOCKGH'
+#!/bin/sh
+if [ "${1:-}" = "pr" ] && [ "${2:-}" = "view" ]; then
+  if [ -n "${MOCK_GH_PR_VIEW_FAIL:-}" ]; then
+    echo "mock gh: pr view failed" >&2
+    exit 1
+  fi
+  printf '{"headRefOid":"%s","baseRefOid":"%s"}' "${MOCK_GH_PR_VIEW_SHA:-}" "${MOCK_GH_PR_BASE_SHA:-}"
+  exit 0
+fi
+echo "mock gh: unhandled subcommand: $*" >&2
+exit 1
+MOCKGH
+chmod +x "$MOCKBIN/gh"
 
 # --- build a minimal, self-contained fixture repo ---------------------------
 git -C "$FIXTURE" init -q -b main
@@ -71,6 +98,11 @@ HEAD_SHA="$(git -C "$FIXTURE" rev-parse HEAD)"
 
 mkdir -p "$FIXTURE/.quetrex"
 printf '{"verify":["true","echo ok"]}' > "$FIXTURE/.quetrex/verify.json"
+# ARMED-ONLY FLOOR: merge-gate.sh (and the rest of the floor) now no-ops entirely on a
+# repo with no .quetrex/project.json (see quetrex-base's ONE-COPY change). This fixture
+# must look "armed" or every DENY assertion below silently degrades to an ALLOW because
+# the gate never engages — matching quetrex-base's own test/merge-gate.test.sh fixture.
+printf '{"branchPrefix":"claude/"}' > "$FIXTURE/.quetrex/project.json" 2>/dev/null
 
 write_ledger_at() {  # write_ledger_at <sha>
   local sha="$1"
@@ -132,20 +164,38 @@ GH_MERGE="$(printf 'gh pr mer%s' 'ge') 123 --squash"
 GH_CREATE="$(printf 'gh pr cre%s' 'ate')"
 MAIN="$(printf 'ma%s' 'in')"
 
+# default_base_sha <cwd> — what the mock reports as baseRefOid: <cwd>'s own
+# local main tip (falling back to master). Reproduces what a merge in that
+# fixture state would naturally be evaluated against.
+default_base_sha() {
+  git -C "$1" rev-parse --verify --quiet main 2>/dev/null \
+    || git -C "$1" rev-parse --verify --quiet master 2>/dev/null
+}
+
+# run_hook <cwd> — resolves the mocked "PR head" to <cwd>'s own current HEAD
+# and "PR base" to its local main tip, so every assertion below keeps testing
+# the same scenario regardless of which branch $FIXTURE is currently on.
+# GH_REPO is always passed explicitly (empty) so an ambiently-exported
+# GH_REPO in the runner's own shell can never make this flaky.
 run_hook() {
-  local cwd="$1" payload
+  local cwd="$1" payload pr_sha base_sha
+  pr_sha="$(git -C "$cwd" rev-parse HEAD 2>/dev/null)"
+  base_sha="$(default_base_sha "$cwd")"
   payload="$(jq -cn --arg cmd "$GH_MERGE" --arg cwd "$cwd" \
     '{tool_input:{command:$cmd},cwd:$cwd}')"
-  printf '%s' "$payload" | CLAUDE_PROJECT_DIR="$cwd" "$HOOK"
+  printf '%s' "$payload" | env PATH="$MOCKBIN:$PATH" MOCK_GH_PR_VIEW_SHA="$pr_sha" MOCK_GH_PR_BASE_SHA="$base_sha" GH_REPO="" CLAUDE_PROJECT_DIR="$cwd" "$HOOK"
 }
 
 # run_cmd <cwd> <command> — exercise the hook against an ARBITRARY command, to
 # assert what is and is not classified as a merge vector in the first place.
+# Same mocked-gh defaults as run_hook.
 run_cmd() {
-  local cwd="$1" cmd="$2" payload
+  local cwd="$1" cmd="$2" payload pr_sha base_sha
+  pr_sha="$(git -C "$cwd" rev-parse HEAD 2>/dev/null)"
+  base_sha="$(default_base_sha "$cwd")"
   payload="$(jq -cn --arg cmd "$cmd" --arg cwd "$cwd" \
     '{tool_input:{command:$cmd},cwd:$cwd}')"
-  printf '%s' "$payload" | CLAUDE_PROJECT_DIR="$cwd" "$HOOK" 2>&1
+  printf '%s' "$payload" | env PATH="$MOCKBIN:$PATH" MOCK_GH_PR_VIEW_SHA="$pr_sha" MOCK_GH_PR_BASE_SHA="$base_sha" GH_REPO="" CLAUDE_PROJECT_DIR="$cwd" "$HOOK" 2>&1
 }
 
 is_deny() { printf '%s' "$1" | grep -q '"permissionDecision":"deny"\|MERGE GATE'; }

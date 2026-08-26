@@ -2,13 +2,27 @@
 
 The private Claude Code plugin marketplace for the Quetrex engine.
 
-This repo is the marketplace for the **`quetrex-factory`** plugin — a stack-agnostic agent
-pipeline (architect → developer(s) → QA → preview+E2E → reviewer → git-workflow) whose
-four pillars are guaranteed by **hooks and on-disk artifacts a hook reads**, never by an
-agent's prose. `quetrex-factory`'s source of truth (agents, hooks, scripts) lives in
-`Glori-Holdings/quetrex-base` at `plugins/quetrex-factory/`; this repo's
-`.claude-plugin/marketplace.json` sources it from there via a `git-subdir` reference so
-there is exactly one copy of the floor scripts, never a second one published here.
+This repo is the marketplace for the Quetrex plugin family — **three plugins** plus stack
+packs, each scoped to where it belongs:
+
+- **`quetrex-setup`** — install **once per machine**, at **user scope**. Ships
+  `/quetrex-setup:login`, `/quetrex-setup:init`, and `/quetrex-setup:update`, plus a
+  one-line `SessionStart` offer to arm any git repo that isn't yet a Quetrex project. Carries
+  no gates and no build engine — it only ever configures other repos.
+- **`quetrex`** — the kanban commands (`task-new`, `task-refine`, `task-build`,
+  `task-rework`, `task-complete`, `merge`, `deploy`, `doctor`). **Project-scoped only**,
+  enabled per repo by `/quetrex-setup:init`.
+- **`quetrex-factory`** — the guarded agent pipeline itself (architect → developer(s) → QA →
+  preview+E2E → reviewer → git-workflow) whose four pillars are guaranteed by **hooks and
+  on-disk artifacts a hook reads**, never by an agent's prose. **Project-scoped only**,
+  enabled per repo by `/quetrex-setup:init`. Its source of truth (agents, hooks, scripts)
+  lives in `Glori-Holdings/quetrex-base` at `plugins/quetrex-factory/`; this repo's
+  `.claude-plugin/marketplace.json` sources it from there via a `git-subdir` reference so
+  there is exactly one copy of the floor scripts, never a second one published here.
+
+Stack packs (**`quetrex-nextjs`** ships today; `quetrex-python`, `quetrex-rust`,
+`quetrex-swift` are on the roadmap) layer stack-specific agents/checks on top of
+`quetrex-factory`. Also project-scoped.
 
 - **Excellent code** — `verify-gate` (Stop + SubagentStop) binds "done" to the real exit
   codes of your project's verify chain. It blocks any finish while typecheck / lint /
@@ -30,13 +44,31 @@ review, agents deploy the branch to an **ephemeral preview** (Fly.io primary via
 app on a seeded Neon branch; Vercel secondary) and run E2E against the live preview; teardown
 is mandatory.
 
-The plugin family is **`quetrex-factory`** (the stack-agnostic engine) plus roadmap overlay
-packs — **`quetrex-nextjs`**, **`quetrex-python`**, **`quetrex-rust`**, **`quetrex-swift`** —
-that layer stack-specific agents/checks on top of `quetrex-factory`. (`quetrex-nextjs` ships
-today; the others are on the roadmap.)
-
 > **Marketplace name:** `quetrex`
 > **Source repo:** `github.com/Glori-Holdings/quetrex-plugins` (**private**)
+
+---
+
+## Install once per machine
+
+Before touching any repo, install **`quetrex-setup`** — it's the only plugin that belongs
+at **user scope**, and it's how you bootstrap everything else.
+
+```bash
+claude plugin marketplace add Glori-Holdings/quetrex-plugins
+claude plugin install quetrex-setup@quetrex   # user scope is the default
+```
+
+Then authenticate to the kanban:
+
+```
+/quetrex-setup:login
+```
+
+That's the whole one-time machine setup. From here, arm each repo you work in with
+`/quetrex-setup:init` (§2) — never install `quetrex`, `quetrex-factory`, or a stack pack at
+user scope yourself; doing so runs their build gates against every repo you open, armed or
+not.
 
 ---
 
@@ -104,14 +136,20 @@ ship; secrets still can't be written; merges still require the artifact gate.
 
 ---
 
-## 2. Pin the plugin in the repo's checked-in `.claude/settings.json`
+## 2. Pin the plugins in the repo's checked-in `.claude/settings.json`
 
 Commit this file at the **repo root** as `.claude/settings.json`. It travels with the
 code, so every clone — and every claude.ai/code cloud session (§3) — loads the exact same
-engine version. Two keys do the work:
+engine. **`/quetrex-setup:init`** (from the machine-wide plugin installed in the previous
+section) writes this file for you, merging non-destructively into whatever is already
+there. The rest of this section shows exactly what it writes, for reference or manual
+repair.
+
+Two keys do the work:
 
 - `extraKnownMarketplaces` — teaches Claude Code where the `quetrex` marketplace lives.
-- `enabledPlugins` — turns the plugin on for this repo, pinned as `name@marketplace`.
+- `enabledPlugins` — turns the plugins on for this repo, as **booleans only** (never a
+  version string or array — see "No version pins" below).
 
 ### Standard repo (any stack)
 
@@ -126,15 +164,17 @@ engine version. Two keys do the work:
     }
   },
   "enabledPlugins": {
-    "quetrex-factory@quetrex": true
+    "quetrex@quetrex": true,
+    "quetrex-factory@quetrex": true,
+    "quetrex-setup@quetrex": true
   }
 }
 ```
 
 ### Next.js repo (adds the stack overlay)
 
-Enable **both** — `quetrex-nextjs` layers Next.js-specific agents/checks on top of the
-stack-agnostic `quetrex-factory` base, so keep both entries:
+Add `quetrex-nextjs` on top — it layers Next.js-specific agents/checks on top of the
+stack-agnostic `quetrex-factory` base, so keep all four entries:
 
 ```json
 {
@@ -147,7 +187,9 @@ stack-agnostic `quetrex-factory` base, so keep both entries:
     }
   },
   "enabledPlugins": {
+    "quetrex@quetrex": true,
     "quetrex-factory@quetrex": true,
+    "quetrex-setup@quetrex": true,
     "quetrex-nextjs@quetrex": true
   }
 }
@@ -158,11 +200,17 @@ stack-agnostic `quetrex-factory` base, so keep both entries:
 
 ### First open
 
-When a developer opens the repo, Claude Code sees the pinned marketplace + plugin and
-prompts once to trust and install it. After that it's silent on every subsequent session.
-To pin an exact release instead of tracking the marketplace default, set the value to a
-version string in `enabledPlugins` (e.g. `"quetrex-factory@quetrex": "1.4.0"`) matched to a
-`version` in the marketplace manifest.
+When a developer opens the repo, Claude Code sees the pinned marketplace + plugins and
+prompts once to trust and install them. After that it's silent on every subsequent session.
+
+### No version pins
+
+Never set an `enabledPlugins` value to anything but `true`. A version string or array —
+e.g. `"quetrex-factory@quetrex": "1.4.0"` or `["1.4.0"]` — makes the plugin count as
+**disabled** for dependency resolution, and the whole `/quetrex:*` command layer fails to
+load silently, even when the pinned version is the exact one installed. There is no way to
+pin a release through this file; the engine auto-updates from the marketplace and the
+running version is surfaced in the status bar, never in config.
 
 ---
 
@@ -274,8 +322,8 @@ floor only adds *undisableable* enforcement.
 After opening a repo that pins the plugin:
 
 ```bash
-# 1. plugin is enabled from the quetrex marketplace
-claude plugin list           # expect: quetrex-factory@quetrex  (enabled)
+# 1. plugins are enabled from the quetrex marketplace
+claude plugin list           # expect: quetrex@quetrex, quetrex-factory@quetrex (enabled)
 
 # 2. hooks are wired (from the plugin + any managed floor)
 #    inside a session:
@@ -300,7 +348,8 @@ runs the project's verify chain before the session is allowed to stop.
 | Cloud session can't install the plugin | GitHub proxy has no access to the private `Glori-Holdings` org | Connect GitHub + grant the `Glori-Holdings` org in claude.ai settings (§3) |
 | Plugin not found / marketplace unknown | `extraKnownMarketplaces` missing or wrong repo slug | Ensure the repo `.claude/settings.json` matches §2 exactly (`Glori-Holdings/quetrex-plugins`) |
 | A teammate disabled a guard | No managed floor in place | Deploy managed settings with `allowManagedHooksOnly` (§4) |
-| `claude plugin list` shows the wrong version | Marketplace default moved | Pin an explicit version in `enabledPlugins` (§2, "First open") |
+| `/quetrex:*` commands don't exist in a repo that should have them | `enabledPlugins` has a version-string or array pin, which counts as disabled | Remove the pin — booleans only (§2, "No version pins") |
+| A `quetrex`, `quetrex-factory`, or stack-pack entry at **USER** scope (`~/.claude/settings.json`) | Installed machine-wide instead of per repo | Remove it — only `quetrex-setup` belongs at user scope ("Install once per machine" above); `/quetrex:doctor` Check 10 flags this |
 
 ---
 
@@ -313,11 +362,12 @@ plugins/
 README.md                         # this file
 ```
 
-`quetrex-factory` itself does **not** live in this repo — it is sourced by
+Neither `quetrex-factory` nor `quetrex-setup` lives in this repo — both are sourced by
 `.claude-plugin/marketplace.json` straight from `Glori-Holdings/quetrex-base`'s
-`plugins/quetrex-factory/` via a `git-subdir` source, so the engine has exactly one copy
-(quetrex-base) rather than a synced duplicate here. The `quetrex` marketplace is defined
-by `.claude-plugin/marketplace.json`; each entry in its `plugins[]` array names a plugin,
-its `source` (a local path for the stack packs, a `git-subdir` reference into quetrex-base
-for `quetrex-factory`, and `github` for the top-level `quetrex` plugin), and a `version`. A
-project's `enabledPlugins` value of `quetrex-factory@quetrex` resolves through that manifest.
+`plugins/quetrex-factory/` and `plugins/quetrex-setup/` via `git-subdir` sources, so each
+engine has exactly one copy (quetrex-base) rather than a synced duplicate here. The
+`quetrex` marketplace is defined by `.claude-plugin/marketplace.json`; each entry in its
+`plugins[]` array names a plugin, its `source` (a local path for the stack packs, a
+`git-subdir` reference into quetrex-base for `quetrex-factory` and `quetrex-setup`, and
+`github` for the top-level `quetrex` plugin), and a `version`. A project's `enabledPlugins`
+value of `quetrex-factory@quetrex` resolves through that manifest.

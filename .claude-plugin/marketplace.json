@@ -59,7 +59,7 @@
         "url": "https://github.com/Glori-Holdings/quetrex-base.git",
         "path": "plugins/quetrex-factory"
       },
-      "version": "1.7.5",
+      "version": "1.7.8",
       "description": "The guarded AI build engine. Specialist agents — architect → developers → QA → reviewer → security — carry each task to a reviewed, merged PR, with hooks that block anything red, unreviewed, or insecure from shipping. Stack-agnostic; add a stack pack for your language.",
       "author": {
         "name": "Glori Holdings"

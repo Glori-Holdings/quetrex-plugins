@@ -3,7 +3,7 @@
   "owner": {
     "name": "Glori Holdings"
   },
-  "description": "Quetrex — an enforcement-first AI build system. Install quetrex to run work from your kanban; the guarded agent pipeline comes with it. Add a stack pack for your language.",
+  "description": "Quetrex \u2014 an enforcement-first AI build system. Install quetrex to run work from your kanban; the guarded agent pipeline comes with it. Add a stack pack for your language.",
   "version": "1.0.0",
   "plugins": [
     {
@@ -13,8 +13,8 @@
         "url": "https://github.com/Glori-Holdings/quetrex-base.git",
         "path": "plugins/quetrex-setup"
       },
-      "version": "1.0.1",
-      "description": "Start here — install once per machine. Ships /quetrex-setup:login, /quetrex-setup:init and /quetrex-setup:update, plus a one-line offer to arm any repo that is not yet a Quetrex project. No gates, no build engine: init enables those per repo.",
+      "version": "1.0.2",
+      "description": "Start here \u2014 install once per machine. Ships /quetrex-setup:login, /quetrex-setup:init and /quetrex-setup:update, plus a one-line offer to arm any repo that is not yet a Quetrex project. No gates, no build engine: init enables those per repo.",
       "author": {
         "name": "Glori Holdings"
       },
@@ -37,7 +37,7 @@
         "repo": "Glori-Holdings/quetrex-base"
       },
       "version": "2.6.4",
-      "description": "Drive your Quetrex board from your editor: task-new/refine/build/rework/complete, merge, deploy, doctor. Enabled per repo by /quetrex-setup:init — do not enable machine-wide.",
+      "description": "Drive your Quetrex board from your editor: task-new/refine/build/rework/complete, merge, deploy, doctor. Enabled per repo by /quetrex-setup:init \u2014 do not enable machine-wide.",
       "author": {
         "name": "Glori Holdings"
       },
@@ -60,7 +60,7 @@
         "path": "plugins/quetrex-factory"
       },
       "version": "1.7.20",
-      "description": "The guarded AI build engine. Specialist agents — architect → developers → QA → reviewer → security — carry each task to a reviewed, merged PR, with hooks that block anything red, unreviewed, or insecure from shipping. Stack-agnostic; add a stack pack for your language.",
+      "description": "The guarded AI build engine. Specialist agents \u2014 architect \u2192 developers \u2192 QA \u2192 reviewer \u2192 security \u2014 carry each task to a reviewed, merged PR, with hooks that block anything red, unreviewed, or insecure from shipping. Stack-agnostic; add a stack pack for your language.",
       "author": {
         "name": "Glori Holdings"
       },
@@ -81,7 +81,7 @@
       "name": "quetrex-nextjs",
       "source": "./plugins/quetrex-nextjs",
       "version": "0.1.0",
-      "description": "Next.js stack pack. App Router / TypeScript conventions + the tsc → eslint → next build → tests → Playwright E2E verify chain. Enable in a Next.js repo.",
+      "description": "Next.js stack pack. App Router / TypeScript conventions + the tsc \u2192 eslint \u2192 next build \u2192 tests \u2192 Playwright E2E verify chain. Enable in a Next.js repo.",
       "author": {
         "name": "Glori Holdings"
       },
@@ -102,7 +102,7 @@
       "name": "quetrex-python",
       "source": "./plugins/quetrex-python",
       "version": "0.1.0",
-      "description": "Python stack pack. The ruff → mypy → pytest verify chain + Python-aware security lenses. Enable in a Python repo.",
+      "description": "Python stack pack. The ruff \u2192 mypy \u2192 pytest verify chain + Python-aware security lenses. Enable in a Python repo.",
       "author": {
         "name": "Glori Holdings"
       },
@@ -122,7 +122,7 @@
       "name": "quetrex-rust",
       "source": "./plugins/quetrex-rust",
       "version": "0.1.0",
-      "description": "Rust stack pack. The cargo fmt → clippy → build → test verify chain + ownership/unsafe security lenses. Enable in a Rust repo.",
+      "description": "Rust stack pack. The cargo fmt \u2192 clippy \u2192 build \u2192 test verify chain + ownership/unsafe security lenses. Enable in a Rust repo.",
       "author": {
         "name": "Glori Holdings"
       },
@@ -141,7 +141,7 @@
       "name": "quetrex-swift",
       "source": "./plugins/quetrex-swift",
       "version": "0.1.0",
-      "description": "Swift stack pack. The swiftlint → swift build → swift test verify chain + Keychain/URLSession/ATS security lenses. Enable in a Swift repo.",
+      "description": "Swift stack pack. The swiftlint \u2192 swift build \u2192 swift test verify chain + Keychain/URLSession/ATS security lenses. Enable in a Swift repo.",
       "author": {
         "name": "Glori Holdings"
       },

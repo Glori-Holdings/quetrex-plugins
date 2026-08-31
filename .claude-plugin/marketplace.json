@@ -13,7 +13,7 @@
         "url": "https://github.com/Glori-Holdings/quetrex-base.git",
         "path": "plugins/quetrex-setup"
       },
-      "version": "1.0.2",
+      "version": "1.0.3",
       "description": "Start here \u2014 install once per machine. Ships /quetrex-setup:login, /quetrex-setup:init and /quetrex-setup:update, plus a one-line offer to arm any repo that is not yet a Quetrex project. No gates, no build engine: init enables those per repo.",
       "author": {
         "name": "Glori Holdings"
